@@ -1,0 +1,191 @@
+openapi: 3.1.0
+info:
+  version: latest
+  title: FedGPT Asset V2 API
+  description: |
+    把檔案交給 FedGPT 的唯一入口。上傳完會拿到一個 `assetKey`，其他 API（Chat、Knowledge 等）就用它來引用這個檔案。
+
+    ## 上傳流程
+
+    分兩步，**檔案本身不經過本 API**——第 1 步跟 FedGPT 換一組上傳憑證，第 2 步拿著憑證直接傳給儲存服務。
+
+    ### 1. 取得上傳憑證
+
+    `POST /public/asset/v2/assets:presign`，帶上檔案的 `contentType` 與 `filename`（**兩個都必填**）。
+
+    回傳 `assetKey`（檔案的識別碼）與一組 `formData` key-value pairs（上傳憑證）。
+
+    ### 2. 上傳檔案
+
+    以 `multipart/form-data` 對 `/asset` 發出 POST，把 `formData` 回傳的**每一組 key-value 原封不動帶上**，最後再加上 `file` 欄位。
+
+    ⚠️ **`file` 必須放在最後一個位置。** 這是 S3 相容的 POST policy 規定，放前面會直接被拒。
+
+    `formData` 的內容由伺服器決定，不要自己增刪或修改——它已經包含 `Content-Type`，**不需要**再自己加一個。
+
+    ```
+    curl --location '/asset' \
+      --form 'key=tmp/Ol5dPKnifWCkroZ0UjvvG' \
+      --form 'bucket=fedgpt' \
+      --form 'policy=eyJleHBpcmF0aW9uIjoiMjAyNC0wNi0yOFQwMDoxMDowMFoiLC4uLn0=' \
+      --form 'x-amz-algorithm=AWS4-HMAC-SHA256' \
+      --form 'x-amz-credential=fedgpt/20240628/us-east-1/s3/aws4_request' \
+      --form 'x-amz-date=20240628T000000Z' \
+      --form 'x-amz-signature=8a1f...' \
+      --form 'Content-Type=application/pdf' \
+      --form "Content-Disposition=attachment; filename*=UTF-8''%E5%B9%B4%E5%BA%A6%E8%B2%A1%E5%A0%B1.pdf" \
+      --form 'x-amz-meta-Filename=年度財報.pdf' \
+      --form 'x-amz-meta-Purpose=general' \
+      --form 'file=@"/path/to/年度財報.pdf"'
+    ```
+
+    上面的 key 名稱是實際會拿到的那些，值請照 presign 的回傳填。
+
+    ## 兩個限制
+
+    | 限制 | 值 | 超過會怎樣 |
+    | --- | --- | --- |
+    | `formData` 有效期 | **10 分鐘** | 過期後上傳會被拒，要重新 presign |
+    | 單檔大小 | **1 GB** | **在第 2 步才失敗**，presign 不會擋 |
+
+    ## 上傳成功之後
+
+    第 2 步成功後，第 1 步拿到的 `assetKey` 就可以帶進其他 API 引用這個檔案。**本 API 不提供查詢或刪除**——`assetKey` 請自己留著。
+servers:
+  - description: API
+    url: /api
+security:
+  - ApiKeyAuth: []
+  - AccessToken: []
+paths:
+  /public/asset/v2/assets:presign:
+    post:
+      tags:
+        - asset
+      summary: 取得上傳憑證
+      description: |
+        上傳流程的第 1 步：拿檔案的 `contentType` 與 `filename` 換一組上傳憑證。
+
+        回傳的 `assetKey` 是這個檔案之後的識別碼，`formData` 是第 2 步要原封帶上的欄位。完整流程與 curl 範例見本頁最上方的說明。
+
+        **這一步不會傳送檔案內容**，也不檢查檔案是否存在。大小超過 1 GB 是在第 2 步才會失敗。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - contentType
+                - filename
+              properties:
+                contentType:
+                  type: string
+                  description: |
+                    要上傳的檔案的 MIME type。
+
+                    **不是 enum，任何合法的 MIME type 都收**——不限於常見的那幾個。
+
+                    這個值有兩個後果：
+
+                    1. 它會原樣出現在回傳的 `formData` 的 `Content-Type` 裡，並且是上傳時的**完全比對條件**。第 2 步送出的 `Content-Type` 與這裡宣告的不一致，儲存服務會直接拒絕。**照抄 `formData` 就不會錯，不要自己另外加一個。**
+                    2. 它會成為該檔案在儲存服務上的 Content-Type。填錯不會被擋，但之後下載這個檔案時瀏覽器會依它決定要顯示還是下載。
+                  example: application/pdf
+                filename:
+                  type: string
+                  description: |
+                    檔案名稱，**必填**。
+
+                    會被寫成該檔案的 `Content-Disposition`，也就是**使用者之後下載時看到的檔名**。中文檔名可以直接填，會自動做 UTF-8 編碼。
+                  example: 年度財報.pdf
+      responses:
+        '200':
+          description: 成功取得上傳憑證，有效期 10 分鐘
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - assetKey
+                  - formData
+                properties:
+                  assetKey:
+                    type: string
+                    description: |
+                      這個檔案的識別碼，格式是 `tmp/` 加上 21 碼的 nanoid。
+
+                      上傳成功後帶著它去呼叫其他 API（Chat、Knowledge 等）即可引用這個檔案。**本 API 沒有查詢端點，請自行保存。**
+                    example: tmp/Ol5dPKnifWCkroZ0UjvvG
+                  formData:
+                    type: object
+                    description: |
+                      第 2 步上傳時要帶的表單欄位。**key 與 value 都由伺服器決定，原封不動帶上**，不要增刪或修改。
+
+                      實際會拿到的 key 是下面 example 的那些：`policy` 與 `x-amz-*` 是簽章，`Content-Type` 與 `Content-Disposition` 來自你在第 1 步填的 `contentType` 與 `filename`。
+
+                      ⚠️ 帶上這些欄位之後，**`file` 欄位必須放在最後**。
+                    additionalProperties:
+                      type: string
+                    example:
+                      key: tmp/Ol5dPKnifWCkroZ0UjvvG
+                      bucket: fedgpt
+                      policy: eyJleHBpcmF0aW9uIjoiMjAyNC0wNi0yOFQwMDoxMDowMFoiLC4uLn0=
+                      x-amz-algorithm: AWS4-HMAC-SHA256
+                      x-amz-credential: fedgpt/20240628/us-east-1/s3/aws4_request
+                      x-amz-date: 20240628T000000Z
+                      x-amz-signature: 8a1f5c2e9b7d4a3f6e0c8b2d5a9f1e3c7b4d6a8f0e2c5b9d1a3f7e4c6b8d0a2f
+                      Content-Type: application/pdf
+                      Content-Disposition: attachment; filename*=UTF-8''%E5%B9%B4%E5%BA%A6%E8%B2%A1%E5%A0%B1.pdf
+                      x-amz-meta-Filename: 年度財報.pdf
+                      x-amz-meta-Purpose: general
+        '400':
+          description: |
+            `contentType` 或 `filename` 沒帶（`reason` 為 `data.validation`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                service: http-gateway
+                reason: data.validation
+                message: invalid request body
+components:
+  schemas:
+    Error:
+      type: object
+      description: |
+        所有錯誤回應的共通格式。`reason` 的完整清單與觸發情境見 Common 分頁。
+      required:
+        - service
+        - reason
+        - message
+      properties:
+        service:
+          type: string
+          description: |
+            產生這個錯誤的後端元件名。回報問題時附上它，可以直接定位到是哪個服務出錯——也是判斷 `reason` 屬於哪一組命名空間的依據。
+          example: http-gateway
+        reason:
+          type: string
+          description: |
+            錯誤代碼。**程式請用這個欄位做分支**，不要去解析 `message`。
+          example: data.validation
+        message:
+          type: string
+          description: |
+            人類可讀的錯誤說明。**措辭與內容不保證穩定**，可能隨版本改變，不要拿來做程式判斷。
+          example: invalid request body
+        field:
+          type: string
+          description: |
+            造成錯誤的欄位名，主要由 `data.validation` 帶上。**不是每個錯誤都有**——沒有的時候這個欄位整個不會出現在回應裡。
+          example: convId
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-Api-Key
+    AccessToken:
+      type: apiKey
+      in: header
+      name: X-Access-Token

@@ -1,0 +1,1012 @@
+openapi: 3.1.0
+info:
+  version: latest
+  title: FedGPT Knowledge V3 API
+  description: |
+    建立知識庫（knowledge）並往裡面放文件（document），供 Chat V2 的 `knowledge` 與 `agentic-rag` 模式檢索。
+
+    ## 兩層結構
+
+    **knowledge 是容器，document 是內容。** 一個 knowledge 底下有多份 document，檢索時以 knowledge 為單位指定。
+
+    ## 四步流程
+
+    ### 1. 建立 knowledge
+
+    `POST /public/knowledge/v3/knowledges`，回傳 `knowledgeId`（21 碼 nanoid，**由伺服器產生，不能自己指定**）。建立者自動成為這個 knowledge 的 `owner`。
+
+    ### 2. 上傳檔案換 assetKey
+
+    走 Asset V2 分頁的上傳流程，拿到 `assetKey`。
+
+    ### 3. 把檔案掛進 knowledge
+
+    `POST /public/knowledge/v3/knowledges/{knowledgeId}/documents`，body 帶第 2 步的 `assetKey`，回傳 `documentId`。
+
+    ### 4. 等索引完成
+
+    ⚠️ **建檔完成不等於可以用。** 上一步回來之後索引才開始跑，要輪詢 `GET .../documents/{documentId}` 看 `displayState`，變成 `completed` 才算進得了檢索。狀態的完整說明見 `Document` schema。
+
+    之後在 Chat V2 建對話時把 `knowledgeId` 填進 `params`，就會以這個知識庫為基礎回答——見 [`POST /public/chat/v2/conversations`](./?urls.primaryName=Chat+V2#/conversation/post_public_chat_v2_conversations)。
+
+    ## 兩層權限
+
+    | 層級 | 檢查什麼 |
+    | --- | --- |
+    | **端點** | 全部端點都要 `kb.admin` 這個帳號權限，沒有就進不來 |
+    | **資源** | 進來之後再逐個 knowledge 檢查 ACL：讀要 `read`、增刪改要 `edit`、刪 knowledge 本身要 `delete` |
+
+    所以有 `kb.admin` 不代表看得到每一個 knowledge——`GET /knowledges` 只回你有 `read` 權限的那些。
+
+    ## 時間格式
+
+    本頁的 `createdAt` / `updatedAt` 都是 **Unix 秒數**。
+servers:
+  - description: API
+    url: /api
+security:
+  - ApiKeyAuth: []
+  - AccessToken: []
+tags:
+  - name: knowledge
+    description: 知識庫本身的建立、查詢、更新與刪除。
+  - name: document
+    description: 知識庫裡的文件。上傳、查狀態、下載與刪除。
+  - name: model
+    description: 查可用的多媒體處理模型，建立 knowledge 時填進 `indexingParams.modelIds`。
+paths:
+  /public/knowledge/v3/models:
+    get:
+      tags:
+        - model
+      summary: 列出可用的處理模型
+      description: |
+        列出可以填進 `indexingParams.modelIds` 的模型，**依種類分組**。
+
+        **只有三種**：`asr`（語音轉文字）、`object-detection`（物件偵測）、`object-recognition`（物件辨識）。每一組各挑一個 `id` 填進建立 knowledge 的請求。
+
+        ⚠️ **只列出已發布且啟用中的模型**——停用或尚未發布的不會出現，所以這份清單會隨部署狀態變動，**不要寫死**。
+
+        每組裡預設模型排最前面（`isDefault` 為 `true`），不確定選哪個就用它。
+      responses:
+        '200':
+          description: 依種類分組的模型清單
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - models
+                properties:
+                  models:
+                    type: array
+                    description: |
+                      各種類的模型群組，依 `type` 字母序排列。**某個種類目前沒有可用模型時，那一組不會出現。**
+                    items:
+                      $ref: '#/components/schemas/ModelGroup'
+        '403':
+          description: |
+            沒有 `kb.admin` 權限
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /public/knowledge/v3/knowledges:
+    get:
+      tags:
+        - knowledge
+      summary: 列出知識庫
+      description: |
+        列出你有 `read` 權限的知識庫。**沒有分頁**，一次回傳全部。
+
+        有 `kb.admin` 不代表看得到每一個——這裡會逐個檢查 ACL，沒有 `read` 權限的不會出現在清單裡。
+      responses:
+        '200':
+          description: 你有 `read` 權限的知識庫
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - knowledges
+                properties:
+                  knowledges:
+                    type: array
+                    description: |
+                      知識庫清單。**一個都沒有時是空陣列**，不是 `null`。
+                    items:
+                      $ref: '#/components/schemas/Knowledge'
+        '403':
+          description: |
+            沒有 `kb.admin` 權限
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    post:
+      tags:
+        - knowledge
+      summary: 建立知識庫
+      description: |
+        建立一個新的知識庫。**`knowledgeId` 由伺服器產生**（21 碼 nanoid），不能自己指定。
+
+        建立者自動成為這個知識庫的 `owner`，也就是後續的 `read` / `edit` / `delete` 都通得過。
+
+        建好之後是空的，要接著用 `POST .../knowledges/{knowledgeId}/documents` 放文件進去。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - knowledge
+              properties:
+                knowledge:
+                  $ref: '#/components/schemas/KnowledgeInput'
+      responses:
+        '200':
+          description: 建立成功，回傳新的 `knowledgeId`
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - knowledge
+                properties:
+                  knowledge:
+                    type: object
+                    required:
+                      - knowledgeId
+                    properties:
+                      knowledgeId:
+                        type: string
+                        description: |
+                          新建知識庫的識別碼，後續端點的 `knowledgeId` 就填這個值。
+                        example: o20jjodcw8zjz4enivghd
+        '400':
+          description: |
+            `name` 或 `description` 沒帶（`reason` 為 `data.validation`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: |
+            沒有 `kb.admin` 權限
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /public/knowledge/v3/knowledges/{knowledgeId}:
+    get:
+      tags:
+        - knowledge
+      summary: 查詢知識庫
+      description: |
+        取得單一知識庫的資訊。需要這個知識庫的 `read` ACL 權限。
+
+        **不含文件清單**，文件要另外打 `GET .../documents`。
+      parameters:
+        - $ref: '#/components/parameters/knowledgeId'
+      responses:
+        '200':
+          description: 知識庫的資訊
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - knowledge
+                properties:
+                  knowledge:
+                    $ref: '#/components/schemas/Knowledge'
+        '403':
+          description: |
+            沒有 `kb.admin` 權限，或沒有這個知識庫的 `read` 權限（`reason` 為 `auth.forbidden`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: |
+            `knowledgeId` 不存在（`reason` 為 `data.not-found`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    put:
+      tags:
+        - knowledge
+      summary: 更新知識庫
+      description: |
+        更新知識庫的名稱、說明、標籤與索引模型。需要這個知識庫的 `edit` ACL 權限。
+
+        ⚠️ **請把整份內容都帶上，不要只帶要改的欄位。** gateway 會把 request 組成一個完整的物件往下送，你沒帶的欄位（例如 `labels`）會以空值送出——**不要依賴「沒帶就保留原值」**。
+
+        改 `indexingParams` **只影響之後才上傳的文件**，已經索引好的不會重跑。
+      parameters:
+        - $ref: '#/components/parameters/knowledgeId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - knowledge
+              properties:
+                knowledge:
+                  $ref: '#/components/schemas/KnowledgeInput'
+      responses:
+        '200':
+          description: |
+            更新成功。**回應是空物件 `{}`**，要看更新後的內容請重新查詢。
+          content:
+            application/json:
+              schema:
+                type: object
+        '400':
+          description: |
+            `name` 或 `description` 沒帶（`reason` 為 `data.validation`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: |
+            沒有 `kb.admin` 權限，或沒有這個知識庫的 `edit` 權限（`reason` 為 `auth.forbidden`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: |
+            `knowledgeId` 不存在（`reason` 為 `data.not-found`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    delete:
+      tags:
+        - knowledge
+      summary: 刪除知識庫
+      description: |
+        刪除整個知識庫。需要這個知識庫的 `delete` ACL 權限——**比讀寫都嚴，`edit` 不夠**。
+
+        ⚠️ **底下的文件會一起消失，而且無法復原。** 正在被 Chat V2 的對話引用的知識庫刪掉之後，那些對話會找不到資料。
+      parameters:
+        - $ref: '#/components/parameters/knowledgeId'
+      responses:
+        '200':
+          description: |
+            刪除成功。**回應是空物件 `{}`**。
+          content:
+            application/json:
+              schema:
+                type: object
+        '403':
+          description: |
+            沒有 `kb.admin` 權限，或沒有這個知識庫的 `delete` 權限（`reason` 為 `auth.forbidden`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: |
+            `knowledgeId` 不存在（`reason` 為 `data.not-found`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /public/knowledge/v3/knowledges/{knowledgeId}/documents:
+    get:
+      tags:
+        - document
+      summary: 列出文件
+      description: |
+        列出這個知識庫裡的文件，用頁碼分頁。需要這個知識庫的 `read` ACL 權限。
+
+        要判斷文件能不能被檢索，看每一筆的 `displayState` 是不是 `completed`。
+      parameters:
+        - $ref: '#/components/parameters/knowledgeId'
+        - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/page'
+      responses:
+        '200':
+          description: |
+            這一頁的文件。
+
+            ⚠️ 樣本裡的 `document` 列出的是**所有可能出現**的欄位，不是每一筆都會全帶——各欄位的出現條件見 `Document` schema。
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - total
+                  - totalPage
+                  - limit
+                  - page
+                  - documents
+                properties:
+                  total:
+                    type: integer
+                    description: |
+                      這個知識庫的文件總數。
+                    example: 42
+                  totalPage:
+                    type: integer
+                    description: |
+                      總頁數。
+                    example: 5
+                  limit:
+                    type: integer
+                    description: |
+                      這一頁的筆數上限，與查詢時帶的相同。
+                    example: 10
+                  page:
+                    type: integer
+                    description: |
+                      目前頁碼。
+                    example: 1
+                  documents:
+                    type: array
+                    description: |
+                      這一頁的文件。
+                    items:
+                      $ref: '#/components/schemas/Document'
+        '400':
+          description: |
+            `limit` 或 `page` 超出範圍（`reason` 為 `data.validation`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: |
+            沒有 `kb.admin` 權限，或沒有這個知識庫的 `read` 權限（`reason` 為 `auth.forbidden`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: |
+            `knowledgeId` 不存在（`reason` 為 `data.not-found`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    post:
+      tags:
+        - document
+      summary: 加入文件
+      description: |
+        把一個已經上傳好的檔案掛進這個知識庫。需要這個知識庫的 `edit` ACL 權限。
+
+        **檔案內容不在這裡傳**——請先走 Asset V2 分頁的上傳流程拿到 `assetKey`，這一步只是把它指給知識庫。
+
+        ⚠️ **回來只代表建檔成功，不代表可以檢索了。** 索引是接著非同步跑的，要輪詢 `GET .../documents/{documentId}` 等 `displayState` 變成 `completed`。
+
+        `documentId` 由伺服器產生（21 碼 nanoid），不能自己指定。
+      parameters:
+        - $ref: '#/components/parameters/knowledgeId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - document
+              properties:
+                document:
+                  $ref: '#/components/schemas/DocumentInput'
+      responses:
+        '200':
+          description: |
+            建檔成功，回傳新的 `documentId`。**索引這時候才開始跑。**
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - document
+                properties:
+                  document:
+                    type: object
+                    required:
+                      - documentId
+                    properties:
+                      documentId:
+                        type: string
+                        description: |
+                          新建文件的識別碼，用它去查索引進度。
+                        example: cw8zjz4enio20jjodvghd
+        '400':
+          description: |
+            request body 不合法（`reason` 為 `data.validation`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: |
+            沒有 `kb.admin` 權限，或沒有這個知識庫的 `edit` 權限（`reason` 為 `auth.forbidden`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: |
+            `knowledgeId` 不存在，或 `assetKey` 對不到檔案（`reason` 為 `data.not-found`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /public/knowledge/v3/knowledges/{knowledgeId}/documents/{documentId}:
+    get:
+      tags:
+        - document
+      summary: 查詢文件
+      description: |
+        取得單一文件的資訊。需要這個知識庫的 `read` ACL 權限。
+
+        **加入文件之後就是輪詢這一支**，看 `displayState` 變成 `completed` 沒有。
+      parameters:
+        - $ref: '#/components/parameters/knowledgeId'
+        - $ref: '#/components/parameters/documentId'
+      responses:
+        '200':
+          description: |
+            文件的資訊與目前的索引狀態。
+
+            ⚠️ 下面的樣本列出的是**所有可能出現**的欄位，不是每一筆都會全帶：`source*` 只有外部來源的文件才有、`error` 只在 `displayState` 為 `error` 時出現、`runError` 只在 `runState` 為 `error` 時出現。
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - document
+                properties:
+                  document:
+                    $ref: '#/components/schemas/Document'
+        '403':
+          description: |
+            沒有 `kb.admin` 權限，或沒有這個知識庫的 `read` 權限（`reason` 為 `auth.forbidden`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: |
+            `knowledgeId` 或 `documentId` 不存在（`reason` 為 `data.not-found`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    delete:
+      tags:
+        - document
+      summary: 刪除文件
+      description: |
+        把一份文件從知識庫移除。需要這個知識庫的 `edit` ACL 權限。
+
+        **刪除本身也是非同步的**——回來之後這份文件會先變成 `deleting`，完成才真的消失；失敗會停在 `deleting_failed`。
+      parameters:
+        - $ref: '#/components/parameters/knowledgeId'
+        - $ref: '#/components/parameters/documentId'
+      responses:
+        '200':
+          description: |
+            已受理刪除。**不代表已經刪完**，狀態見上方說明。
+        '403':
+          description: |
+            沒有 `kb.admin` 權限，或沒有這個知識庫的 `edit` 權限（`reason` 為 `auth.forbidden`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: |
+            `knowledgeId` 或 `documentId` 不存在（`reason` 為 `data.not-found`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /public/knowledge/v3/knowledges/{knowledgeId}/documents/{documentId}:download:
+    get:
+      tags:
+        - document
+      summary: 下載文件原始檔
+      description: |
+        取得文件的下載連結。需要這個知識庫的 `read` ACL 權限。
+
+        **這一支不回傳檔案內容，而是回 `307` 轉址**到一個短效的預簽 URL。多數 HTTP client 預設會自動跟隨轉址，直接拿到檔案；要自己處理的話讀回應的 `Location` header。
+
+        ⚠️ **只有本機上傳的文件下載得到。** 從外部系統匯入的文件（`sourceType` 有值，例如 `synology`）在這裡沒有可下載的檔案，會回 `404`，`message` 會寫是哪一種來源。那些檔案請用文件本身的 `sourceShareUrl` 到來源系統開啟。
+      parameters:
+        - $ref: '#/components/parameters/knowledgeId'
+        - $ref: '#/components/parameters/documentId'
+      responses:
+        '307':
+          description: |
+            轉址到短效的預簽下載 URL
+          headers:
+            Location:
+              schema:
+                type: string
+                example: https://storage.example.com/fedgpt/upload/RdVLzq5hUIv1UBhvriveu?X-Amz-Signature=8a1f5c2e
+              description: |
+                預簽的下載 URL。**有效期很短**，拿到就用，不要存起來重複使用。
+            Cache-Control:
+              schema:
+                type: string
+                example: no-store
+              description: |
+                固定是 `no-store`——這個轉址帶著簽章，不應該被快取。
+        '403':
+          description: |
+            沒有 `kb.admin` 權限，或沒有這個知識庫的 `read` 權限（`reason` 為 `auth.forbidden`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: |
+            `knowledgeId` 或 `documentId` 不存在，或這份文件來自外部系統、沒有可下載的檔案（`reason` 為 `data.not-found`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+components:
+  schemas:
+    Model:
+      type: object
+      description: |
+        一個可用的多媒體處理模型。**只列出已發布且啟用中的**，停用或未發布的不會出現。
+      required:
+        - id
+        - name
+        - type
+        - version
+        - isDefault
+      properties:
+        id:
+          type: string
+          description: |
+            模型的識別碼。**建立 knowledge 時 `indexingParams.modelIds` 要填的就是這個值。**
+          example: asr-general-1.1.0
+        name:
+          type: string
+          description: |
+            模型名稱（不含版本）。
+          example: asr-general
+        type:
+          type: string
+          description: |
+            模型種類，與所屬 `ModelGroup` 的 `type` 相同。
+          enum:
+            - asr
+            - object-detection
+            - object-recognition
+          example: asr
+        version:
+          type: string
+          description: |
+            模型版本。
+          example: 1.1.0
+        isDefault:
+          type: boolean
+          description: |
+            是不是這個種類的預設模型。**不確定要選哪一個就用它。**
+          example: true
+    ModelGroup:
+      type: object
+      description: |
+        同一種類的模型。**群組之間依 `type` 字母序排列**，群組內預設模型排最前面、其餘依 `name` 排序。
+      required:
+        - type
+        - models
+      properties:
+        type:
+          type: string
+          description: |
+            這一組是哪個種類。**只有這三種**——其他種類的模型不會出現在這支端點。
+          enum:
+            - asr
+            - object-detection
+            - object-recognition
+          example: asr
+        models:
+          type: array
+          description: |
+            這一組的模型。
+          items:
+            $ref: '#/components/schemas/Model'
+    Error:
+      type: object
+      description: |
+        所有錯誤回應的共通格式。`reason` 的完整清單與觸發情境見 Common 分頁。
+      required:
+        - service
+        - reason
+        - message
+      properties:
+        service:
+          type: string
+          description: |
+            產生這個錯誤的後端元件名。回報問題時附上它，可以直接定位到是哪個服務出錯——也是判斷 `reason` 屬於哪一組命名空間的依據。
+          example: http-gateway
+        reason:
+          type: string
+          description: |
+            錯誤代碼。**程式請用這個欄位做分支**，不要去解析 `message`。
+          example: data.validation
+        message:
+          type: string
+          description: |
+            人類可讀的錯誤說明。**措辭與內容不保證穩定**，可能隨版本改變，不要拿來做程式判斷。
+          example: invalid request body
+        field:
+          type: string
+          description: |
+            造成錯誤的欄位名，主要由 `data.validation` 帶上。**不是每個錯誤都有**——沒有的時候這個欄位整個不會出現在回應裡。
+          example: convId
+    KnowledgeModelIds:
+      type: object
+      description: |
+        三種多媒體處理模型各挑一個。可用的值打 `GET /public/knowledge/v3/models` 取得——**那支端點回傳的就是這三種 type**，各挑一個 `id` 填進來。
+      required:
+        - asrModelId
+        - objectDetectionModelId
+        - objectRecognitionModelId
+      properties:
+        asrModelId:
+          type: string
+          description: |
+            語音轉文字（ASR）模型的 `id`，處理音訊與影片。
+          example: asr-general-1.1.0
+        objectDetectionModelId:
+          type: string
+          description: |
+            物件偵測模型的 `id`，找出圖片裡有哪些東西、在哪裡。
+          example: object-detection-general-1.0.2
+        objectRecognitionModelId:
+          type: string
+          description: |
+            物件辨識模型的 `id`，判斷偵測到的東西是什麼。
+          example: object-recognition-general-1.0.4
+    KnowledgeIndexingParams:
+      type: object
+      description: |
+        索引時要用哪些模型處理多媒體內容。**只影響之後才上傳的 document**，已經索引好的不會重跑。
+      required:
+        - modelIds
+      properties:
+        modelIds:
+          $ref: '#/components/schemas/KnowledgeModelIds'
+    Knowledge:
+      type: object
+      description: |
+        一個知識庫。
+      required:
+        - knowledgeId
+        - name
+        - description
+        - version
+        - createdAt
+        - updatedAt
+      properties:
+        knowledgeId:
+          type: string
+          description: |
+            知識庫的識別碼，21 碼 nanoid。**由伺服器產生**，建立時不能自己指定。
+          example: o20jjodcw8zjz4enivghd
+        name:
+          type: string
+          description: |
+            知識庫名稱。
+          example: 信用卡規章
+        description:
+          type: string
+          description: |
+            這個知識庫收錄什麼。
+          example: 各卡別的權益、費率與申辦條件
+        labels:
+          type: array
+          items:
+            type: string
+            example: 信用卡
+          description: |
+            自訂標籤，用來分類與過濾。**沒有標籤時整個欄位不會出現**，不是空陣列。
+          example:
+            - 信用卡
+            - 金融
+            - 個資
+        version:
+          type: string
+          description: |
+            知識庫的索引版本。索引架構升級時會變動，一般呼叫端不需要處理。
+          example: '2.1'
+        indexingParams:
+          $ref: '#/components/schemas/KnowledgeIndexingParams'
+        createdAt:
+          type: integer
+          format: int64
+          description: |
+            建立時間，Unix 秒數。
+          example: 1719504000
+        updatedAt:
+          type: integer
+          format: int64
+          description: |
+            最後更新時間，Unix 秒數。
+          example: 1719504000
+    KnowledgeInput:
+      type: object
+      description: |
+        建立或更新知識庫的輸入。
+      required:
+        - name
+        - description
+      properties:
+        name:
+          type: string
+          description: |
+            知識庫名稱。**必填。**
+          example: 信用卡規章
+        description:
+          type: string
+          description: |
+            這個知識庫收錄什麼。**必填。**
+          example: 各卡別的權益、費率與申辦條件
+        labels:
+          type: array
+          items:
+            type: string
+            example: 信用卡
+          description: |
+            自訂標籤，用來分類與過濾。
+          example:
+            - 信用卡
+            - 金融
+            - 個資
+        indexingParams:
+          $ref: '#/components/schemas/KnowledgeIndexingParams'
+    Document:
+      type: object
+      description: |
+        知識庫裡的一份文件。
+      required:
+        - documentId
+        - fileName
+        - displayState
+        - state
+        - chunkSize
+        - sensitiveInfoCheckRequired
+        - createdAt
+        - updatedAt
+      properties:
+        documentId:
+          type: string
+          description: |
+            文件的識別碼，21 碼 nanoid。**由伺服器產生**，建立時不能自己指定。
+          example: cw8zjz4enio20jjodvghd
+        fileName:
+          type: string
+          description: |
+            檔案名稱。
+          example: 信用卡權益總表.pdf
+        displayState:
+          type: string
+          description: |
+            **要看文件能不能用，看這個欄位。** 它是 `state` 收斂後的版本，值少、語意穩定，適合直接拿來顯示或判斷。
+
+            | 值 | 意思 |
+            | --- | --- |
+            | `doing` | 處理中 |
+            | `cancelling` | 取消中 |
+            | `completed` | **完成，進得了檢索** |
+            | `error` | 失敗（也包含「工作根本沒開始跑」——請重新上傳） |
+            | `cancelled` | 已取消 |
+            | `skip` | 略過（例如不支援的格式） |
+            | `deleting` | 刪除中 |
+            | `deleting_failed` | 刪除失敗 |
+            | `unknown` | 對不到上面任何一種 |
+          enum:
+            - doing
+            - cancelling
+            - completed
+            - error
+            - cancelled
+            - skip
+            - deleting
+            - deleting_failed
+            - unknown
+          example: completed
+        state:
+          type: string
+          description: |
+            內部的細部狀態。**一般情況請改看 `displayState`**——這個欄位值多、還混著早期版本留下的值，未來也可能再增加。
+
+            目前使用中的：`created`（尚未開始）、`doing`、`cancelling`、`completed`、`skipped`、`failed`、`cancelled`、`deleting`、`deleting_failed`。
+
+            早期版本留下、舊資料仍可能出現的：`indexing`、`pending_unzip`、`pending_dispatch`、`pending_indexing`、`pending_migration`、`pending_redo`、`pending_cancel`、`pending_delete`。
+          example: completed
+        sourceType:
+          type: string
+          description: |
+            檔案的來源系統。**本機上傳的文件不會有這個欄位**；從 NAS 匯入的是 `synology`。
+
+            ⚠️ 有值就代表**不能用下載端點**——`GET .../{documentId}:download` 只服務本機上傳的檔案，其他來源會回 `404`。
+          example: synology
+        sourcePath:
+          type: string
+          description: |
+            檔案在來源系統上的路徑，給人看的。本機上傳的文件不會有這個欄位。
+          example: /team/Q2/report.pdf
+        sourceShareUrl:
+          type: string
+          description: |
+            在來源系統開啟這個檔案的連結。本機上傳的文件不會有這個欄位。
+          example: https://nas.example.com/sharing/abc123
+        sourceServerId:
+          type: string
+          description: |
+            來源系統的伺服器識別碼，同一種 `sourceType` 可能接了多台。本機上傳的文件不會有這個欄位。
+          example: nas-hq-01
+        error:
+          type: string
+          description: |
+            失敗原因。`displayState` 不是 `error` 時不會有這個欄位。
+          example: unsupported file format
+        runState:
+          type: string
+          description: |
+            索引工作本身的結果，與整份文件的 `state` 分開記。工作還沒結束時不會有這個欄位。
+          enum:
+            - completed
+            - error
+            - skip
+          example: completed
+        runError:
+          type: string
+          description: |
+            索引工作的失敗原因，`runState` 為 `error` 時才有。
+          example: embedding service timeout
+        chunkSize:
+          type: integer
+          format: int64
+          description: |
+            索引後切成幾個 chunk。**索引完成前是 `0`**，可以用來粗估文件被拆得多細。
+          example: 128
+        metadata:
+          description: |
+            建立時自己帶的 key-value，原樣回傳。沒帶就不會有這個欄位。
+          anyOf:
+            - type: object
+              additionalProperties: true
+            - type: 'null'
+          example:
+            部門: 信用卡處
+            年度: '2024'
+        sensitiveInfoCheckRequired:
+          type: boolean
+          description: |
+            索引時有沒有做個資檢查，與建立時帶的值相同。
+          example: true
+        createdAt:
+          type: integer
+          format: int64
+          description: |
+            建立時間，Unix 秒數。
+          example: 1719504000
+        updatedAt:
+          type: integer
+          format: int64
+          description: |
+            最後更新時間，Unix 秒數。**索引狀態變動時也會動**，可以用來判斷有沒有進展。
+          example: 1719504000
+    IndexFilter:
+      type: object
+      description: |
+        **[Beta]** 索引過濾條件。這組欄位仍在調整，行為可能變動。
+      properties:
+        filterTags:
+          type: array
+          items:
+            type: string
+            example: 信用卡
+          description: |
+            索引用的標籤。
+          example:
+            - 信用卡
+            - 年度報告
+        filterInt:
+          type: integer
+          format: int64
+          description: |
+            索引用的數值條件。
+          example: 20260327
+    DocumentInput:
+      type: object
+      description: |
+        把一個已上傳的檔案掛進知識庫。
+      required:
+        - assetKey
+      properties:
+        assetKey:
+          type: string
+          description: |
+            Asset V2 上傳流程拿到的 `assetKey`。**檔案內容不在這裡傳**，這一步只是把已經上傳好的檔案指給這個知識庫。
+          example: upload/RdVLzq5hUIv1UBhvriveu
+        sensitiveInfoCheckRequired:
+          type: boolean
+          description: |
+            索引時要不要做個資檢查。不填是 `false`。
+          example: true
+        metadata:
+          description: |
+            自訂的 key-value，會原樣存下並在查詢文件時回傳。
+          anyOf:
+            - type: object
+              additionalProperties: true
+            - type: 'null'
+          example:
+            部門: 信用卡處
+            年度: '2024'
+        indexFilter:
+          description: |
+            **[Beta]** 索引時的過濾條件，見 `IndexFilter`。
+          allOf:
+            - $ref: '#/components/schemas/IndexFilter'
+  parameters:
+    knowledgeId:
+      in: path
+      name: knowledgeId
+      required: true
+      schema:
+        type: string
+        example: o20jjodcw8zjz4enivghd
+      description: |
+        知識庫的識別碼，21 碼 nanoid。從 `POST /public/knowledge/v3/knowledges` 的回應或 `GET .../knowledges` 取得。
+    limit:
+      in: query
+      name: limit
+      required: false
+      schema:
+        type: integer
+        default: 10
+        minimum: 1
+        maximum: 100
+        example: 10
+      description: |
+        每頁筆數。不填是 `10`，可填 `1`~`100`，超出範圍會拿到 `400 data.validation`。
+    page:
+      in: query
+      name: page
+      schema:
+        type: integer
+        default: 1
+        minimum: 1
+        example: 1
+      description: |
+        頁碼，**從 1 開始**。不填是 `1`。
+    documentId:
+      in: path
+      name: documentId
+      required: true
+      schema:
+        type: string
+        example: cw8zjz4enio20jjodvghd
+      description: |
+        文件的識別碼，21 碼 nanoid。從 `POST .../documents` 的回應或 `GET .../documents` 取得。
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-Api-Key
+    AccessToken:
+      type: apiKey
+      in: header
+      name: X-Access-Token

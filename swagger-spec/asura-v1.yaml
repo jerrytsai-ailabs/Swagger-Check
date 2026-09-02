@@ -1,0 +1,1010 @@
+openapi: 3.1.0
+info:
+  version: latest
+  title: FedGPT Asura V1 API
+  description: |
+    提供各種語音服務API，包括【語音轉文字】，【文字轉語音】。
+
+    ## 語音轉文字 - 音檔上傳
+    在使用本服務前，請先確保您的音訊檔案可供 FedGPT 存取。您可以選擇以下任一方式提供音檔：
+
+    1. **使用可公開存取的音檔連結**：請將音檔上傳至一個 FedGPT 可存取的伺服器（如公開的 S3、GCS 或其他檔案服務），並提供該連結供辨識使用。
+    2. **使用本平台的上傳功能**：若您沒有可用的檔案服務環境，可先透過 [`/public/asura/v1/transcriptions:presign`](./?urls.primaryName=Asura+V1#/Transcription/post_public_asura_v1_transcriptions_presign)取得formData上傳檔案，並取得對應的assetKey，再將該assetKey用於本 API 進行語音辨識。
+
+    請確保提供的音檔格式與編碼正確，以避免辨識錯誤或失敗。
+
+    ⚠️ **辨識是非同步的。** 建立之後回來只有工作資訊，辨識結果要輪詢 [`GET /public/asura/v1/transcriptions/{transcriptionId}`](./?urls.primaryName=Asura+V1#/Transcription/get_public_asura_v1_transcriptions__transcriptionId_) 等 `status` 變成 `completed`。
+
+    ## 語音轉文字 - 即時轉錄
+    透過 [`/public/asura/v1/neartime/token`](./?urls.primaryName=Asura+V1#/Neartime/post_public_asura_v1_neartime_token) 設定 config 並獲取 token，再用回應的 `path` 連 websocket 進行即時語音辨識。
+
+    **不要自己拼 websocket 的路徑**——`path` 的前綴由各部署的設定決定，寫死會在別的環境失效。
+
+    連上之後要送什麼、收什麼，見 [Asura Neartime ASR WebSocket API](/swagger/asyncapi/asura-neartime-v3/)。
+
+    ## 文字轉語音 - HTTP 串流回應
+    將文字轉換為語音，並以串流方式即時回傳音訊。音色有兩種來源：`speeches:stream` 從固定清單挑，`speeches:zero-shot` 用你自己提供的一段聲音當範本。
+
+    ## 不是每個部署都有全部端點
+
+    即時轉錄與文字轉語音**各由一個部署開關控制**。沒開的部署上那些端點不存在，會拿到 `404`——請以實際打得通的為準，不要假設一定都在。
+
+    ## 時間格式
+
+    `createdAt` / `updatedAt` 是 **Unix 秒數**；`audioDuration` 是**毫秒**。
+servers:
+  - description: API
+    url: /api
+security:
+  - ApiKeyAuth: []
+  - AccessToken: []
+tags:
+  - name: Transcription
+    description: 音檔上傳、建立轉錄工作、查詢辨識結果。
+  - name: Neartime
+    description: 即時轉錄的連線 token。
+  - name: Speech
+    description: 文字轉語音，兩種音色來源。
+paths:
+  /public/asura/v1/transcriptions:
+    post:
+      tags:
+        - Transcription
+      summary: 建立轉錄工作
+      description: |
+        送出一個音檔開始辨識。
+
+        ⚠️ **這是非同步的，回來時還沒有辨識結果。** 回應只有工作本身的資訊，`sentences` 要用 `GET /public/asura/v1/transcriptions/{transcriptionId}` 輪詢，等 `status` 變成 `completed`。
+
+        音檔用 `audioUri`（自己的檔案服務）或 `assetKey`（走本站台的上傳流程）**擇一提供**。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TranscriptionInput'
+      responses:
+        '200':
+          description: |
+            已受理。**這不是辨識結果**——`status` 這時候通常是 `pending`。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Transcription'
+        '400':
+          description: |
+            `modelConfig` 沒帶或不合法、`assetKey` 對不到檔案（`reason` 為 `data.validation`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /public/asura/v1/transcriptions/{transcriptionId}:
+    get:
+      tags:
+        - Transcription
+      summary: 查詢轉錄工作與結果
+      description: |
+        **建立之後就是輪詢這一支。** 看 `status`：`pending` / `ongoing` 代表還在跑（`progress` 是 0~100 的進度），`completed` 才有 `sentences`。
+
+        失敗時看 `failReason`，重試細節看 `failedJobs`。
+      parameters:
+        - $ref: '#/components/parameters/transcriptionId'
+      responses:
+        '200':
+          description: |
+            目前的狀態，以及辨識結果（尚未完成時 `sentences` 是空的）。
+
+            ⚠️ 下面的樣本列出的是**所有可能出現**的欄位，不是每一筆都會全帶——`failReason` 與 `failedJobs` 只在失敗時才有內容。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TranscriptionDetail'
+        '404':
+          description: |
+            `transcriptionId` 不存在（`reason` 為 `data.not-found`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /public/asura/v1/neartime/token:
+    post:
+      tags:
+        - Neartime
+      summary: 取得即時轉錄的連線 token
+      description: |
+        即時轉錄的第 1 步：把辨識設定送上來，換一個 websocket 連線用的 token。
+
+        **設定在這一步就決定了**，websocket 連上之後不能改；要換語言或模型請重新取一個 token。
+
+        接著用回應的 `path` 連 websocket：把 `path` 接在本站台的 host 後面、協定換成 `wss`。**不要自己拼路徑**——`path` 的前綴由各部署的設定決定，寫死會在別的環境失效。
+
+        連上之後的訊息格式見 [Asura Neartime ASR WebSocket API](/swagger/asyncapi/asura-neartime-v3/)。
+
+        ⚠️ **這支端點不是每個部署都有。** 未啟用即時轉錄的部署上它不存在，會拿到 `404`。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NeartimeConfig'
+      responses:
+        '200':
+          description: 連線用的 token 與路徑
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - token
+                  - path
+                properties:
+                  token:
+                    type: string
+                    description: |
+                      連線用的 token。已經含在 `path` 的 query 裡，一般不需要自己取用。
+                    example: y2fvqI9Su7jD3h93Pggp1
+                  path:
+                    type: string
+                    description: |
+                      websocket 的路徑，**已經帶好 token**。接在本站台的 host 後面、協定用 `wss` 就是完整的連線位址。
+                    example: /asura/neartime/ws/v3?token=y2fvqI9Su7jD3h93Pggp1
+        '400':
+          description: |
+            `modelConfig` 沒帶或不合法（`reason` 為 `data.validation`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: |
+            這個部署沒有啟用即時轉錄
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /public/asura/v1/transcriptions:presign:
+    post:
+      tags:
+        - Transcription
+      summary: 取得音檔上傳憑證
+      description: |
+        沒有可公開存取的檔案服務時，用這支端點把音檔上傳到 FedGPT。
+
+        1. 用要上傳的檔案的 `contentType` 換一組上傳憑證
+        2. 把回傳的 `formData` 原封帶著，以 `multipart/form-data` 把檔案 POST 上去（**`file` 欄位放最後**）
+        3. 拿第 1 步的 `assetKey` 去建立轉錄工作
+
+        這支端點拿到的 `assetKey` 也可以用在 [`POST /public/asura/v1/speeches:zero-shot`](./?urls.primaryName=Asura+V1#/Speech/post_public_asura_v1_speeches_zero_shot) 的 `promptVoiceAssetKey`。
+
+        **單一檔案上限 2 GB。**
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - contentType
+              properties:
+                contentType:
+                  type: string
+                  description: |
+                    要上傳的檔案的 MIME type。**必填，而且只收下面這幾個**——不在清單裡會拿到 `400 data.validation`。
+
+                    不確定的話用 `application/octet-stream`。
+                  enum:
+                    - audio/mpeg
+                    - audio/mp4
+                    - audio/wav
+                    - audio/aac
+                    - audio/x-m4a
+                    - video/mpeg
+                    - video/mp4
+                    - video/quicktime
+                    - application/octet-stream
+                  example: audio/wav
+      responses:
+        '200':
+          description: 成功取得上傳憑證
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - assetKey
+                properties:
+                  assetKey:
+                    type: string
+                    description: |
+                      這個檔案的識別碼。上傳完成後把它填進 `TranscriptionInput.assetKey`。**本 API 沒有查詢端點，請自行保存。**
+                    example: upload/t2lrEdYO0SNZIsdjod7L4
+                  formData:
+                    type: object
+                    additionalProperties:
+                      type: string
+                    description: |
+                      第 2 步上傳時要帶的表單欄位。**key 與 value 都由伺服器決定，原封不動帶上**，不要增刪或修改。
+                    example:
+                      key: upload/t2lrEdYO0SNZIsdjod7L4
+                      bucket: fedgpt
+                      policy: eyJleHBpcmF0aW9uIjoiMjAyNC0wNi0yOFQwMDoxMDowMFoiLC4uLn0=
+                      x-amz-algorithm: AWS4-HMAC-SHA256
+                      x-amz-credential: fedgpt/20240628/us-east-1/s3/aws4_request
+                      x-amz-date: 20240628T000000Z
+                      x-amz-signature: 8a1f5c2e9b7d4a3f6e0c8b2d5a9f1e3c7b4d6a8f0e2c5b9d1a3f7e4c6b8d0a2f
+                      Content-Type: audio/wav
+        '400':
+          description: |
+            `contentType` 沒帶或不在支援清單裡（`reason` 為 `data.validation`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /public/asura/v1/speeches:stream:
+    post:
+      tags:
+        - Speech
+      summary: 文字轉語音（預設音色）
+      description: |
+        把文字轉成語音，**以串流方式邊產生邊回傳**，不必等整段合成完。
+
+        音色從 `modelConfig.voice` 的固定清單挑一個。要用自己的聲音請改打 [`POST /public/asura/v1/speeches:zero-shot`](./?urls.primaryName=Asura+V1#/Speech/post_public_asura_v1_speeches_zero_shot)。
+
+        ⚠️ **回應是音訊位元組，不是 JSON。** 失敗時才會回 JSON 錯誤。
+
+        ⚠️ **這支端點不是每個部署都有。** 未啟用文字轉語音的部署上它不存在，會拿到 `404`。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SpeechInput'
+      responses:
+        '200':
+          description: 音訊串流
+          content:
+            audio/wav:
+              schema:
+                type: string
+                format: binary
+                example: UklGRigAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=
+          headers:
+            Content-Type:
+              description: |
+                音訊的 MIME type。
+              schema:
+                type: string
+                example: audio/wav
+            Cache-Control:
+              description: |
+                固定是 `no-cache`——串流內容不應該被快取。
+              schema:
+                type: string
+                example: no-cache
+            Connection:
+              description: |
+                固定是 `keep-alive`，連線在串流結束前不會關閉。
+              schema:
+                type: string
+                example: keep-alive
+        '400':
+          description: |
+            request body 不合法（`reason` 為 `data.validation`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: |
+            這個部署沒有啟用文字轉語音
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /public/asura/v1/speeches:zero-shot:
+    post:
+      tags:
+        - Speech
+      summary: 文字轉語音（自訂音色）
+      description: |
+        把文字轉成語音，**音色來自你提供的一段聲音範本**，不需要事先訓練。同樣以串流方式回傳。
+
+        範本用 `promptVoiceUrl`（自己的檔案服務）或 `promptVoiceAssetKey`（走 `transcriptions:presign` 上傳）**擇一提供**，並在 `promptText` 逐字填上範本裡講的內容——填得越準合出來的聲音越像。
+
+        ⚠️ **回應是音訊位元組，不是 JSON。** 失敗時才會回 JSON 錯誤。
+
+        ⚠️ **這支端點不是每個部署都有。** 未啟用文字轉語音的部署上它不存在，會拿到 `404`。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ZeroShotSpeechInput'
+      responses:
+        '200':
+          description: 音訊串流
+          content:
+            audio/wav:
+              schema:
+                type: string
+                format: binary
+                example: UklGRigAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=
+          headers:
+            Content-Type:
+              description: |
+                音訊的 MIME type。
+              schema:
+                type: string
+                example: audio/wav
+            Cache-Control:
+              description: |
+                固定是 `no-cache`——串流內容不應該被快取。
+              schema:
+                type: string
+                example: no-cache
+            Connection:
+              description: |
+                固定是 `keep-alive`，連線在串流結束前不會關閉。
+              schema:
+                type: string
+                example: keep-alive
+        '400':
+          description: |
+            request body 不合法，或 `promptVoiceAssetKey` 對不到檔案（`reason` 為 `data.validation`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: |
+            這個部署沒有啟用文字轉語音
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+components:
+  schemas:
+    Lang:
+      type: string
+      description: |
+        辨識語言。**這是選一個語言模型，不是「自動偵測」**——填錯語言辨識結果會很差。
+
+        中文用 `zh`，粵語用 `yue`。
+      enum:
+        - en
+        - zh
+        - de
+        - es
+        - ru
+        - ko
+        - fr
+        - ja
+        - pt
+        - tr
+        - pl
+        - ca
+        - nl
+        - ar
+        - sv
+        - it
+        - id
+        - hi
+        - fi
+        - vi
+        - he
+        - uk
+        - el
+        - ms
+        - cs
+        - ro
+        - da
+        - hu
+        - ta
+        - 'no'
+        - th
+        - ur
+        - hr
+        - bg
+        - lt
+        - la
+        - mi
+        - ml
+        - cy
+        - sk
+        - te
+        - fa
+        - lv
+        - bn
+        - sr
+        - az
+        - sl
+        - kn
+        - et
+        - mk
+        - br
+        - eu
+        - is
+        - hy
+        - ne
+        - mn
+        - bs
+        - kk
+        - sq
+        - sw
+        - gl
+        - mr
+        - pa
+        - si
+        - km
+        - sn
+        - yo
+        - so
+        - af
+        - oc
+        - ka
+        - be
+        - tg
+        - sd
+        - gu
+        - am
+        - yi
+        - lo
+        - uz
+        - fo
+        - ht
+        - ps
+        - tk
+        - nn
+        - mt
+        - sa
+        - lb
+        - my
+        - bo
+        - tl
+        - mg
+        - as
+        - tt
+        - haw
+        - ln
+        - ha
+        - ba
+        - jw
+        - su
+        - yue
+      example: zh
+    TranscriptionInput:
+      type: object
+      description: |
+        建立轉錄工作的輸入。
+      required:
+        - modelConfig
+      properties:
+        audioUri:
+          type: string
+          description: |
+            音檔的位置，**必須是 FedGPT 連得到的**。
+
+            與 `assetKey` **擇一即可**；兩個都給的話以 `audioUri` 為準。
+          example: https://storage.example.com/audio/meeting.wav
+        assetKey:
+          type: string
+          description: |
+            用 `POST /public/asura/v1/transcriptions:presign` 上傳後拿到的 `assetKey`。沒有可公開存取的檔案服務時走這條。
+
+            與 `audioUri` **擇一即可**。
+          example: upload/t2lrEdYO0SNZIsdjod7L4
+        modelConfig:
+          type: object
+          description: |
+            要用哪個模型、辨識哪種語言。**必填。**
+          required:
+            - model
+            - lang
+          properties:
+            model:
+              type: string
+              description: |
+                辨識模型。
+              example: asr-general-1.1.0
+            lang:
+              $ref: '#/components/schemas/Lang'
+            commonPrompts:
+              type: array
+              items:
+                type: string
+                maxLength: 100
+                example: 第三季營收
+              description: |
+                詞彙提示，用來提高專有名詞的辨識率。填會議裡會出現的人名、產品名、術語等。**每個提示最長 100 字。**
+              example:
+                - 第三季營收
+                - 毛利率
+        featureConfig:
+          type: object
+          description: |
+            要不要開額外的處理。**每一項都會增加處理時間。**
+          properties:
+            speakerDiarization:
+              type: boolean
+              description: |
+                要不要區分說話者。不開的話每個句子的 `speakerId` 都是 `unknown`。
+              example: false
+            speakerCount:
+              type: integer
+              description: |
+                預期有幾位說話者。**不確定就填 `0`**（或不填），由模型自行判斷。
+              example: 0
+            sentiment:
+              type: boolean
+              description: |
+                要不要做情緒判斷。開了之後每個句子的 `sentiment` 才有意義。
+              example: false
+            timestampGranularity:
+              type: string
+              description: |
+                時間戳的精細度。
+
+                | 值 | 做什麼 |
+                | --- | --- |
+                | `segment`（預設） | 直接用辨識模型給的時間戳 |
+                | `word` | 額外做強制對齊，**詞級時間戳與 `confidence` 才準**，但比較慢 |
+
+                ⚠️ 用預設的 `segment` 時，`Sentence.confidence` 會是模型的預設值 `1`，不是真的信心值。
+              enum:
+                - segment
+                - word
+              default: segment
+              example: segment
+    Status:
+      type: string
+      description: |
+        轉錄工作目前的狀態。
+
+        | 值 | 意思 |
+        | --- | --- |
+        | `pending` | 已受理，還沒開始 |
+        | `ongoing` | 處理中，可以看 `progress` |
+        | `completed` | **完成，`sentences` 有內容** |
+        | `error` | 失敗，原因見 `failReason` |
+        | `expired` | 已過期 |
+      enum:
+        - completed
+        - pending
+        - ongoing
+        - expired
+        - error
+      example: completed
+    Transcription:
+      type: object
+      description: |
+        一筆轉錄工作。**建立時回傳的是這個形狀，不含辨識結果**——結果要另外查。
+      required:
+        - transcriptionId
+        - audioUri
+        - model
+        - lang
+        - isSpeakerDiarization
+        - speakerCount
+        - status
+        - failReason
+        - audioDuration
+        - createdAt
+        - updatedAt
+      properties:
+        transcriptionId:
+          type: string
+          description: |
+            這筆轉錄工作的識別碼。**查結果時填進路徑的就是這個值。**
+          example: cw8zjz4enio20jjodvghd
+        audioUri:
+          type: string
+          description: |
+            實際拿去辨識的音檔位置。用 `assetKey` 建立的話，這裡會是伺服器換算出來的位置。
+          example: https://storage.example.com/fedgpt/upload/t2lrEdYO0SNZIsdjod7L4
+        model:
+          type: string
+          description: |
+            實際使用的辨識模型。
+          example: asr-general-1.1.0
+        lang:
+          $ref: '#/components/schemas/Lang'
+        commonPrompts:
+          type: array
+          items:
+            type: string
+            example: 第三季營收
+          description: |
+            建立時帶的詞彙提示，原樣回傳。
+          example:
+            - 第三季營收
+            - 毛利率
+        isSpeakerDiarization:
+          type: integer
+          description: |
+            有沒有做說話者辨識。**這裡是 `0` / `1` 而不是布林值**——建立時填的 `featureConfig.speakerDiarization` 才是 `true` / `false`。
+          example: 0
+        speakerCount:
+          type: integer
+          description: |
+            說話者人數。
+          example: 0
+        timestampGranularity:
+          type: string
+          description: |
+            時間戳的精細度，與建立時帶的相同。詳細差別見 `TranscriptionInput`。
+          enum:
+            - segment
+            - word
+          example: segment
+        progress:
+          type: integer
+          description: |
+            處理進度，0~100。**只有查詢端點會帶這個欄位**，建立時的回應沒有。
+          example: 99
+        status:
+          $ref: '#/components/schemas/Status'
+        failReason:
+          type: string
+          description: |
+            失敗原因。`status` 不是 `error` 時是空字串。
+          example: transcode failed
+        audioDuration:
+          type: integer
+          description: |
+            音檔長度，**毫秒**。
+          example: 4205
+        createdAt:
+          type: integer
+          description: |
+            建立時間，Unix 秒數。
+          example: 1719504000
+        updatedAt:
+          type: integer
+          description: |
+            最後更新時間，Unix 秒數。**處理進度變動時也會動。**
+          example: 1719504000
+    Error:
+      type: object
+      description: |
+        所有錯誤回應的共通格式。`reason` 的完整清單與觸發情境見 Common 分頁。
+      required:
+        - service
+        - reason
+        - message
+      properties:
+        service:
+          type: string
+          description: |
+            產生這個錯誤的後端元件名。回報問題時附上它，可以直接定位到是哪個服務出錯——也是判斷 `reason` 屬於哪一組命名空間的依據。
+          example: http-gateway
+        reason:
+          type: string
+          description: |
+            錯誤代碼。**程式請用這個欄位做分支**，不要去解析 `message`。
+          example: data.validation
+        message:
+          type: string
+          description: |
+            人類可讀的錯誤說明。**措辭與內容不保證穩定**，可能隨版本改變，不要拿來做程式判斷。
+          example: invalid request body
+        field:
+          type: string
+          description: |
+            造成錯誤的欄位名，主要由 `data.validation` 帶上。**不是每個錯誤都有**——沒有的時候這個欄位整個不會出現在回應裡。
+          example: convId
+    Word:
+      type: object
+      description: |
+        句子裡的一個詞。
+      required:
+        - word
+        - start
+        - end
+      properties:
+        word:
+          type: string
+          description: |
+            詞本身。
+          example: 今天
+        start:
+          type: integer
+          description: |
+            起始時間，**毫秒**，相對於音檔開頭。
+          example: 177
+        end:
+          type: integer
+          description: |
+            結束時間，**毫秒**，相對於音檔開頭。
+          example: 200
+    Sentence:
+      type: object
+      description: |
+        辨識出來的一個句子。
+      required:
+        - sentence
+        - sid
+        - speakerId
+        - start
+        - end
+        - confidence
+        - sentiment
+        - words
+      properties:
+        sentence:
+          type: string
+          description: |
+            句子的文字。
+          example: 今天的會議先討論第三季的營收。
+        sid:
+          type: string
+          description: |
+            句子的識別碼。
+          example: yb9R3TLG9t
+        speakerId:
+          type: string
+          description: |
+            說話者。**沒有開啟 speaker diarization 時是 `unknown`**——要區分說話者請在建立時把 `featureConfig.speakerDiarization` 設成 `true`。
+          example: unknown
+        start:
+          type: integer
+          description: |
+            起始時間，**毫秒**，相對於音檔開頭。
+          example: 177
+        end:
+          type: integer
+          description: |
+            結束時間，**毫秒**，相對於音檔開頭。
+          example: 613
+        confidence:
+          type: number
+          description: |
+            辨識信心值。
+
+            ⚠️ **只有 `timestampGranularity` 為 `word` 時這個值才有意義。** 用預設的 `segment` 時它會是模型的預設值 `1`，不代表信心真的滿分。
+          example: 0.58
+        sentiment:
+          type: integer
+          description: |
+            情緒判斷。`0` 是中性，`-1` 是負面。
+          example: 0
+        words:
+          type: array
+          description: |
+            這個句子拆出來的詞。
+          items:
+            $ref: '#/components/schemas/Word'
+    FailedJob:
+      type: object
+      description: |
+        一次失敗的處理工作。`status` 為 `error` 時用來看重試了幾次、為什麼失敗。
+      properties:
+        attempts:
+          type: integer
+          description: |
+            嘗試次數。
+          example: 3
+        reason:
+          type: string
+          description: |
+            失敗原因。
+          example: transcode failed
+    TranscriptionDetail:
+      type: object
+      description: |
+        轉錄工作加上辨識結果。**`status` 為 `completed` 之前 `sentences` 會是空的。**
+      allOf:
+        - $ref: '#/components/schemas/Transcription'
+        - type: object
+          properties:
+            sentences:
+              type: array
+              description: |
+                辨識出來的句子，依時間排序。
+              items:
+                $ref: '#/components/schemas/Sentence'
+            failedJobs:
+              type: array
+              description: |
+                失敗的處理工作。`status` 為 `error` 時看這裡。
+              items:
+                $ref: '#/components/schemas/FailedJob'
+    NeartimeConfig:
+      type: object
+      description: |
+        即時轉錄的設定。**在拿 token 的時候就決定好**，websocket 連上之後不能改。
+      required:
+        - modelConfig
+      properties:
+        modelConfig:
+          type: object
+          description: |
+            要用哪個模型、辨識哪種語言。**必填。**
+          required:
+            - model
+            - lang
+          properties:
+            model:
+              type: string
+              description: |
+                辨識模型。
+              example: asr-general-1.1.0
+            lang:
+              $ref: '#/components/schemas/Lang'
+            commonPrompts:
+              type: array
+              items:
+                type: string
+                maxLength: 100
+                example: 第三季營收
+              description: |
+                詞彙提示，用來提高專有名詞的辨識率。**每個提示最長 100 字。**
+              example:
+                - 第三季營收
+                - 毛利率
+        featureConfig:
+          type: object
+          description: |
+            要不要開額外的處理。
+          properties:
+            speakerDiarization:
+              type: boolean
+              description: |
+                要不要區分說話者。
+              example: false
+            speakerCount:
+              type: integer
+              description: |
+                預期有幾位說話者。不確定就填 `0`。
+              example: 0
+    SpeechModelConfig:
+      type: object
+      description: |
+        要用哪個模型、哪個聲音。
+      required:
+        - model
+        - voice
+      properties:
+        model:
+          type: string
+          description: |
+            合成模型。
+          example: tts-general-0.0.1
+        voice:
+          type: string
+          description: |
+            音色。**這是預先訓練好的固定音色**；要用自己的聲音請改打 `POST /public/asura/v1/speeches:zero-shot`。
+          enum:
+            - barret
+            - jarvis
+            - yating
+            - yiru
+          example: yating
+    SpeechInput:
+      type: object
+      description: |
+        用預設音色合成語音。
+      required:
+        - modelConfig
+      properties:
+        input:
+          type: object
+          description: |
+            要唸的內容。
+          required:
+            - text
+            - type
+          properties:
+            text:
+              type: string
+              description: |
+                要轉成語音的文字。
+              example: 今天的會議先討論第三季的營收。
+            type:
+              type: string
+              description: |
+                文字的格式。目前只支援純文字。
+              enum:
+                - text
+              example: text
+        modelConfig:
+          $ref: '#/components/schemas/SpeechModelConfig'
+        audioConfig:
+          type: object
+          description: |
+            輸出音訊的格式。
+          properties:
+            encoding:
+              type: string
+              description: |
+                音訊編碼。目前只支援 16-bit PCM。
+              enum:
+                - LINEAR16
+              example: LINEAR16
+    ZeroShotSpeechInput:
+      type: object
+      description: |
+        用**你自己提供的一段聲音**當範本合成語音，不需要事先訓練音色。
+      required:
+        - input
+      properties:
+        input:
+          type: object
+          description: |
+            要唸的內容，以及當作音色範本的那段聲音。
+          required:
+            - text
+          properties:
+            text:
+              type: string
+              description: |
+                要轉成語音的文字。
+              example: 今天的會議先討論第三季的營收。
+            type:
+              type: string
+              description: |
+                文字的格式。目前只支援純文字。
+              enum:
+                - text
+              example: text
+            promptVoiceUrl:
+              type: string
+              description: |
+                音色範本的音檔位置，**必須是 FedGPT 連得到的**。
+
+                與 `promptVoiceAssetKey` **擇一即可**；兩個都給的話以 `promptVoiceUrl` 為準。
+              example: https://storage.example.com/audio/sample.wav
+            promptVoiceAssetKey:
+              type: string
+              description: |
+                音色範本的 `assetKey`。**用 `POST /public/asura/v1/transcriptions:presign` 上傳**——那支端點同時服務轉錄與這裡的音色範本。
+
+                與 `promptVoiceUrl` **擇一即可**。
+              example: upload/t2lrEdYO0SNZIsdjod7L4
+            promptText:
+              type: string
+              description: |
+                音色範本裡實際講的內容。**照著音檔逐字填**，填得越準合出來的聲音越像。
+              example: 大家好，這是一段測試錄音。
+        modelConfig:
+          type: object
+          description: |
+            要用哪個模型。**這裡沒有 `voice`**——音色來自 `promptVoiceUrl` / `promptVoiceAssetKey`。
+          required:
+            - model
+          properties:
+            model:
+              type: string
+              description: |
+                合成模型。
+              example: tts-general-0.0.1
+        audioConfig:
+          type: object
+          description: |
+            輸出音訊的格式。
+          properties:
+            encoding:
+              type: string
+              description: |
+                音訊編碼。目前只支援 16-bit PCM。
+              enum:
+                - LINEAR16
+              example: LINEAR16
+  parameters:
+    transcriptionId:
+      in: path
+      name: transcriptionId
+      required: true
+      schema:
+        type: string
+        example: cw8zjz4enio20jjodvghd
+      description: |
+        轉錄工作的識別碼，從 `POST /public/asura/v1/transcriptions` 的回應取得。
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-Api-Key
+    AccessToken:
+      type: apiKey
+      in: header
+      name: X-Access-Token

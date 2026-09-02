@@ -1,0 +1,569 @@
+openapi: 3.1.0
+info:
+  version: latest
+  title: FedGPT Auth V2 API
+  description: |
+    取得憑證。**這是接 FedGPT 的第一站**——本站台其他分頁的每一支 API 都要帶憑證，拿不到憑證後面全部免談。
+
+    ## 兩種憑證，用途不同
+
+    | 憑證 | header | 適合 |
+    | --- | --- | --- |
+    | **access token** | `X-Access-Token` | 有使用者登入的情境。有效期短，過期要重新登入 |
+    | **API key** | `X-Api-Key` | 伺服器對伺服器的整合。可自訂效期，不需要有人在線上 |
+
+    **兩種擇一即可**，同時帶不會更安全。長期跑的整合建議用 API key——access token 會過期，沒有人能重新登入的排程就斷了。
+
+    ## 怎麼開始
+
+    ### 1. 先問有哪些登入方式
+
+    `GET /public/auth/v2/providers`。回傳的每一項有 `provider`（要打哪條 login）、`isValid`（現在能不能用）與 `isDefault`（預設哪一個）。
+
+    **不要寫死**——各部署啟用的 provider 不同，`ldap` 沒設定好時 `isValid` 會是 `false` 並在 `failedReason` 說原因。
+
+    ### 2. 登入
+
+    **每個 provider 一條路徑，不是用參數指定**——把上一步拿到的 `provider` 值代進去：
+
+    ```
+    POST /public/auth/v2/{provider}/login
+    ```
+
+    例如 `fedgpt` 對應 `POST /public/auth/v2/fedgpt/login`、`ldap` 對應 `POST /public/auth/v2/ldap/login`。**除了這兩個通用的之外，部分部署另有專屬的 provider**，一律以 `/providers` 回傳的為準。
+
+    成功會回 `token`、`expiredAt`（到期的 Unix 秒數）與 `expiredTime`（有效秒數）。**token 只在回應的 body 裡**，把它放進後續請求的 `X-Access-Token`。
+
+    ### 3.（伺服器整合）換成 API key
+
+    登入之後打 `POST /public/auth/v2/apikeys` 建立 API key，之後就用 `X-Api-Key`，不必再登入。
+
+    **效期規則見該端點**——`expiredAt` 是必填的，而且最長約一年。
+
+    ## 憑證還有效嗎
+
+    `GET /public/auth/v2/auth:validate`。有效回 `200`，無效回 `401`（`reason` 為 `auth.invalid-auth` 或 `auth.no-auth`）。**沒有回應內容，看 status code 就好。**
+servers:
+  - description: API
+    url: /api
+security:
+  - ApiKeyAuth: []
+  - AccessToken: []
+tags:
+  - name: auth
+    description: 登入、登出，以及查詢可用的登入方式。
+  - name: apikey
+    description: 管理**自己的** API key。要代管別人的請看 Admin V1 分頁——那邊的效期規則也不一樣。
+paths:
+  /public/auth/v2/providers:
+    get:
+      tags:
+        - auth
+      summary: 列出可用的登入方式
+      description: |
+        列出這個部署啟用了哪些登入 provider。**登入之前先打這一支**，不要把 provider 寫死——各部署啟用的不同。
+
+        回傳的 `provider` 決定要打哪一條 login 路徑（例如 `ldap` → `POST /public/auth/v2/ldap/login`）。
+      security: []
+      responses:
+        '200':
+          description: 可用的登入方式
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    description: |
+                      provider 清單。**`isValid` 為 `false` 的不能用**，原因看 `failedReason`。
+                    items:
+                      type: object
+                      properties:
+                        name:
+                          type: string
+                          description: |
+                            顯示名稱，給人看的。
+                          example: 公司網域帳號
+                        provider:
+                          type: string
+                          description: |
+                            provider 代號。**這個值決定要打哪一條 login 路徑**——`ldap` 對應 `/public/auth/v2/ldap/login`。
+                          example: ldap
+                        isValid:
+                          type: boolean
+                          description: |
+                            現在能不能用。`false` 代表這個 provider 沒設定好，打它的 login 會失敗。
+                          example: true
+                        isDefault:
+                          type: boolean
+                          description: |
+                            是不是預設的登入方式。介面上可以優先顯示這一個。
+                          example: false
+                        failedReason:
+                          type: string
+                          description: |
+                            `isValid` 為 `false` 時的原因。**正常時整個欄位不會出現在回應裡。**
+                          example: ldap config is not enabled
+  /public/auth/v2/fedgpt/login:
+    post:
+      tags:
+        - auth
+      summary: 登入
+      description: |
+        用帳號密碼換一個 access token。**這是本站台唯一不需要憑證的端點。**
+
+        **每個 provider 一條路徑**（`/public/auth/v2/{provider}/login`），不是用參數指定。要打哪一條先看 `GET /public/auth/v2/providers`——部分部署另有專屬的 provider，一律以那支回傳的為準。
+
+        `authKey` / `authSecret` 的意義依 provider 而定：`fedgpt` 是平台自己的帳號密碼，`ldap` 是網域帳號密碼。
+
+        **token 只在回應的 body 裡**，把它放進後續請求的 `X-Access-Token` header。
+
+        需要長期不中斷的整合請改用 API key（`POST /public/auth/v2/apikeys`）——token 會過期，沒有人能重新登入的排程就斷了。
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - authKey
+                - authSecret
+              properties:
+                authKey:
+                  type: string
+                  description: |
+                    帳號。`fedgpt` 是平台帳號，`ldap` 是網域帳號。
+                  example: alice@example.com
+                authSecret:
+                  type: string
+                  description: |
+                    密碼。
+                  example: my_password
+      responses:
+        '200':
+          description: 登入成功，回傳 access token
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token:
+                    type: string
+                    description: |
+                      access token。放進後續請求的 `X-Access-Token` header。
+                    example: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJkZmQ5ZjYxMCJ9.8a1f5c2e
+                  expiredAt:
+                    type: integer
+                    format: uint64
+                    description: |
+                      到期時間，Unix 秒數。
+                    example: 1719511200
+                  expiredTime:
+                    type: integer
+                    format: uint64
+                    description: |
+                      有效秒數。與 `expiredAt` 是同一件事的兩種表示，用哪個都可以。
+                    example: 7200
+        '401':
+          description: |
+            帳號或密碼錯誤（`reason` 為 `auth.invalid-auth`），或該 provider 未設定／未啟用（`reason` 為 `auth.invalid-provider`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: |
+            連續登入失敗導致帳號暫時鎖定（`reason` 為 `auth.locked`）。`message` 會附上還要等幾秒。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /public/auth/v2/ldap/login:
+    post:
+      tags:
+        - auth
+      summary: 登入
+      description: |
+        用帳號密碼換一個 access token。**這是本站台唯一不需要憑證的端點。**
+
+        **每個 provider 一條路徑**（`/public/auth/v2/{provider}/login`），不是用參數指定。要打哪一條先看 `GET /public/auth/v2/providers`——部分部署另有專屬的 provider，一律以那支回傳的為準。
+
+        `authKey` / `authSecret` 的意義依 provider 而定：`fedgpt` 是平台自己的帳號密碼，`ldap` 是網域帳號密碼。
+
+        **token 只在回應的 body 裡**，把它放進後續請求的 `X-Access-Token` header。
+
+        需要長期不中斷的整合請改用 API key（`POST /public/auth/v2/apikeys`）——token 會過期，沒有人能重新登入的排程就斷了。
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - authKey
+                - authSecret
+              properties:
+                authKey:
+                  type: string
+                  description: |
+                    帳號。`fedgpt` 是平台帳號，`ldap` 是網域帳號。
+                  example: alice@example.com
+                authSecret:
+                  type: string
+                  description: |
+                    密碼。
+                  example: my_password
+      responses:
+        '200':
+          description: 登入成功，回傳 access token
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token:
+                    type: string
+                    description: |
+                      access token。放進後續請求的 `X-Access-Token` header。
+                    example: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJkZmQ5ZjYxMCJ9.8a1f5c2e
+                  expiredAt:
+                    type: integer
+                    format: uint64
+                    description: |
+                      到期時間，Unix 秒數。
+                    example: 1719511200
+                  expiredTime:
+                    type: integer
+                    format: uint64
+                    description: |
+                      有效秒數。與 `expiredAt` 是同一件事的兩種表示，用哪個都可以。
+                    example: 7200
+        '401':
+          description: |
+            帳號或密碼錯誤（`reason` 為 `auth.invalid-auth`），或該 provider 未設定／未啟用（`reason` 為 `auth.invalid-provider`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: |
+            連續登入失敗導致帳號暫時鎖定（`reason` 為 `auth.locked`）。`message` 會附上還要等幾秒。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /public/auth/v2/logout:
+    post:
+      tags:
+        - auth
+      summary: 登出
+      description: |
+        註銷目前使用的 access token。註銷後再用同一個 token 會拿到 `401 auth.invalid-auth`。
+
+        **只影響 access token，不影響 API key。** 要停用 API key 請打 `DELETE /public/auth/v2/apikeys:batchDelete`。
+      responses:
+        '200':
+          description: 登出結果
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    description: |
+                      是否成功註銷。
+                    example: true
+  /public/auth/v2/auth:validate:
+    get:
+      tags:
+        - auth
+      summary: 檢查憑證是否有效
+      description: |
+        檢查你帶的憑證（`X-Access-Token` 或 `X-Api-Key`）現在還有沒有效。
+
+        **沒有回應內容，看 status code 就好**：`200` 代表有效，`401` 代表無效或沒帶。
+
+        適合在長時間閒置後、真正發出業務請求之前先確認一次，省下一次失敗的重試。
+      responses:
+        '200':
+          description: |
+            憑證有效。**沒有 body。**
+        '401':
+          description: |
+            沒帶憑證（`reason` 為 `auth.no-auth`）或憑證已失效／過期／被註銷（`reason` 為 `auth.invalid-auth`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /public/auth/v2/apikeys:
+    get:
+      tags:
+        - apikey
+      summary: 列出自己的 API key
+      description: |
+        列出**你自己的** API key，用頁碼分頁。要看別人的請走 Admin V1 分頁。
+
+        回傳含完整的 `key` 值。
+      parameters:
+        - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/page'
+        - $ref: '#/components/parameters/order'
+      responses:
+        '200':
+          description: 你自己的 API key 清單
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total:
+                    type: integer
+                    description: |
+                      符合條件的總筆數。用來判斷還剩多少配額（上限 25 把）。
+                    example: 3
+                  totalPage:
+                    type: integer
+                    description: |
+                      總頁數。
+                    example: 1
+                  limit:
+                    type: integer
+                    description: |
+                      這一頁的筆數上限，與查詢時帶的相同。
+                    example: 10
+                  page:
+                    type: integer
+                    description: |
+                      目前頁碼。
+                    example: 1
+                  items:
+                    type: array
+                    description: |
+                      這一頁的 API key。
+                    items:
+                      $ref: '#/components/schemas/Apikey'
+    post:
+      tags:
+        - apikey
+      summary: 建立自己的 API key
+      description: |
+        一次建立 `number` 把 API key，全部屬於**呼叫者自己**（要代別人建請走 Admin V1 分頁）。
+
+        **完整的 key 值只在這個回應裡出現一次**，請立刻存起來。
+
+        ## `expiredAt` 的三條規則
+
+        | 規則 | 違反時 |
+        | --- | --- |
+        | **必填** | `400 apikey.expiry-invalid`：`expiredAt is required` |
+        | 不能是**過去**的時間 | `400 apikey.expiry-invalid`：`expiredAt is already in the past` |
+        | 不能超過**現在起算約一年** | `400 apikey.expiry-invalid`：`expiredAt exceeds the allowed maximum` |
+
+        ⚠️ **`expiredAt` 填 `0` 不代表「永不過期」，會被當成沒填而拒絕。** 永不過期只有管理員代建的 key 才做得到（Admin V1 分頁）。
+
+        ## 數量上限
+
+        **每個使用者最多 25 把。** 判斷方式是「既有數量 ＋ 這次要建的 `number`」，超過就整批不建，回 `400 apikey.quota-exceeded`。
+
+        要先看還剩多少，打 `GET /public/auth/v2/apikeys` 看 `total`。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - number
+                - expiredAt
+              properties:
+                number:
+                  type: integer
+                  format: uint64
+                  description: |
+                    這次要建幾把。**必填**，且不能是 `0`。
+
+                    「既有數量 ＋ 這個值」超過 25 就整批失敗。
+                  example: 1
+                expiredAt:
+                  type: integer
+                  format: uint64
+                  description: |
+                    到期時間，Unix 秒數。**必填**，規則見上方說明——不能是過去，也不能超過約一年後。
+                  example: 1751040000
+      responses:
+        '200':
+          description: |
+            建立成功。**`keys` 裡的完整值只出現這一次。**
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  expiredAt:
+                    type: integer
+                    format: uint64
+                    description: |
+                      這批 key 的到期時間，與請求帶的相同。
+                    example: 1751040000
+                  keys:
+                    type: array
+                    description: |
+                      這次建立的 key，數量等於請求的 `number`。**立刻存起來。**
+                    items:
+                      type: string
+                      example: fk_9Xq2mLvT4bN7cRzA1sD8gH
+        '400':
+          description: |
+            `number` 沒帶、`expiredAt` 不合規則（`reason` 為 `apikey.expiry-invalid`），或超過 25 把上限（`reason` 為 `apikey.quota-exceeded`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /public/auth/v2/apikeys:batchDelete:
+    delete:
+      tags:
+        - apikey
+      summary: 批次刪除 API key
+      description: |
+        一次刪除多把 API key。刪掉之後立刻失效，無法復原。
+
+        ⚠️ **只能刪自己的 key。** 清單裡只要有一把不屬於你，**整批都不會刪**，回 `403 auth.forbidden`，`message` 會列出是哪幾把。
+
+        **要輪替 key 的話，先建新的、確認能用，再刪舊的**——避免把自己正在用的憑證刪掉之後接不回去。
+      parameters:
+        - name: keys
+          in: query
+          required: true
+          description: |
+            要刪除的 key，**至少一把**。
+          schema:
+            type: array
+            minItems: 1
+            items:
+              type: string
+              example: fk_9Xq2mLvT4bN7cRzA1sD8gH
+      responses:
+        '200':
+          description: 刪除成功
+        '400':
+          description: |
+            `keys` 沒帶或是空的（`reason` 為 `data.validation`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: |
+            清單裡有不屬於你的 key（`reason` 為 `auth.forbidden`，`message` 會列出是哪幾把）。**整批都不會刪。**
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-Api-Key
+    AccessToken:
+      type: apiKey
+      in: header
+      name: X-Access-Token
+  schemas:
+    Error:
+      type: object
+      description: |
+        所有錯誤回應的共通格式。`reason` 的完整清單與觸發情境見 Common 分頁。
+      required:
+        - service
+        - reason
+        - message
+      properties:
+        service:
+          type: string
+          description: |
+            產生這個錯誤的後端元件名。回報問題時附上它，可以直接定位到是哪個服務出錯——也是判斷 `reason` 屬於哪一組命名空間的依據。
+          example: http-gateway
+        reason:
+          type: string
+          description: |
+            錯誤代碼。**程式請用這個欄位做分支**，不要去解析 `message`。
+          example: data.validation
+        message:
+          type: string
+          description: |
+            人類可讀的錯誤說明。**措辭與內容不保證穩定**，可能隨版本改變，不要拿來做程式判斷。
+          example: invalid request body
+        field:
+          type: string
+          description: |
+            造成錯誤的欄位名，主要由 `data.validation` 帶上。**不是每個錯誤都有**——沒有的時候這個欄位整個不會出現在回應裡。
+          example: convId
+    Apikey:
+      type: object
+      description: |
+        一把 API key。**`key` 只在建立時的回應裡看得到完整值**，之後查詢列表也拿得到，但沒有其他方式可以「找回」——請自行妥善保存。
+      properties:
+        userId:
+          type: string
+          description: |
+            這把 key 屬於誰。本端點只會回你自己的 key，所以這個值就是你的 user ID。
+          example: dfd9f610-bd64-4487-af4a-9578550c09b0
+        key:
+          type: string
+          description: |
+            金鑰本身。放進請求的 `X-Api-Key` header 使用。
+          example: fk_9Xq2mLvT4bN7cRzA1sD8gH
+        expiredAt:
+          type: integer
+          format: uint64
+          description: |
+            到期時間，Unix 秒數。過了這個時間這把 key 就失效，用它呼叫會拿到 `401 auth.invalid-auth`。
+          example: 1751040000
+        createdAt:
+          type: integer
+          format: uint64
+          description: |
+            建立時間，Unix 秒數。
+          example: 1719504000
+        creatorId:
+          type: string
+          description: |
+            建立者的 user ID。自己建的 key 會與 `userId` 相同；**由管理員代建的則不同**（見 Admin V1 分頁）。
+          example: dfd9f610-bd64-4487-af4a-9578550c09b0
+  parameters:
+    limit:
+      in: query
+      name: limit
+      schema:
+        type: integer
+        format: uint64
+        default: 10
+        example: 10
+      description: |
+        這一頁要取幾筆。
+    page:
+      in: query
+      name: page
+      schema:
+        type: integer
+        default: 1
+        example: 1
+      description: |
+        要第幾頁，從 `1` 起算。**這裡是頁碼分頁，不是游標分頁**——跟本站台其他用 `cursor` 的端點不一樣。
+    order:
+      in: query
+      name: order
+      schema:
+        type: string
+        default: '-created_at'
+        enum:
+          - '-created_at'
+          - created_at
+        example: '-created_at'
+      description: |
+        排序方式。`-created_at` 是新的在前（預設），`created_at` 是舊的在前。

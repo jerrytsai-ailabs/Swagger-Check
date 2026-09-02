@@ -1,0 +1,118 @@
+openapi: 3.1.0
+info:
+  version: latest
+  title: FedGPT Public API
+  description: |
+    FedGPT 對外開放的 API。這一頁是**所有分頁共通**的規則：空值怎麼算、錯誤長什麼樣、`reason` 有哪些。
+
+    串流只有 3 個分頁會用到、而且格式不只一種，所以獨立成 **SSE 串流** 分頁。
+
+    ## 空值語意
+
+    **沒有指定的欄位一律視同空值（`""`）；`null` 不是合法值。**
+
+    送出請求時不要用 `null` 表示「不設定」——直接把欄位省略，或送空字串。
+
+    讀取回應時，「沒有值」的欄位可能是空字串，也可能整個不出現（例如 `Error` 的 `field`）。兩種都當成空值處理，不要對 `null` 做特別分支。
+
+    ## 串流（SSE）
+
+    部分端點以 `text/event-stream` 串流回應。**站上有兩種互不相容的 SSE 格式**，哪一支端點用哪一種、以及各自怎麼判斷成功，見 **SSE 串流** 分頁。
+
+    這裡只留唯一兩種都適用的那一條：⚠️ **串流一旦開始，HTTP status code 就固定是 `200`**，錯誤送在串流裡面，不看串流內容就不會知道失敗了。
+
+    ## 錯誤格式
+
+    所有錯誤回應的 body 都是 `Error` 物件（見本頁下方的 Schemas）。要點只有一條：**用 `reason` 做程式分支，不要解析 `message`。** `message` 是給人看的，內容與措辭不保證穩定；`reason` 才是契約的一部分。
+
+    ## 錯誤代碼
+
+    下表是本站台 gateway 自己會回的 `reason`。
+
+    **`reason` 要搭配 `service` 一起讀。** 請求若由下游服務處理（例如 FedFlow），回來的會是該服務自己的 `reason`（如 `flow.validation`、`data.conflict`、`data.unprocessable`），不在下表——`service` 欄位會告訴你錯誤是誰產生的。
+
+    ### 認證與授權
+
+    | HTTP | reason | 什麼情況會拿到 |
+    | --- | --- | --- |
+    | 401 | `auth.no-auth` | 完全沒帶憑證，或帶的 token 無法解析 |
+    | 401 | `auth.invalid-auth` | 憑證本身有問題：token 過期、已被撤銷，或 API key 過期 |
+    | 401 | `auth.invalid-provider` | 該帳號的登入來源（LDAP 等）未設定或未啟用 |
+    | 403 | `auth.forbidden` | 憑證有效，但這個帳號沒有執行該操作的權限 |
+    | 429 | `auth.locked` | 連續登入失敗導致帳號暫時鎖定，`message` 會附上還要等幾秒 |
+
+    ### 請求資料
+
+    | HTTP | reason | 什麼情況會拿到 |
+    | --- | --- | --- |
+    | 400 | `data.validation` | 參數格式錯誤或缺少必填。`field` 會指出是哪個欄位 |
+    | 400 | `apikey.expiry-invalid` | 建立 API key 時 `expiredAt` 沒給、已過期，或超過允許的最長效期 |
+    | 400 | `apikey.quota-exceeded` | API key 數量已達上限，要先刪掉舊的 |
+    | 404 | `data.not-found` | 指定的 ID 不存在。**權限不足是 `403 auth.forbidden`，不會偽裝成 404** |
+    | 409 | `data.unique` | 同名（或同 key）的資源已經存在 |
+    | 410 | `chat.expired` | 這個對話已經過期，要開新的 `convId` |
+    | 423 | `data.locked` | 資源正被另一個作業佔用（例如文件正在刪除中、知識庫摘要正在產生），稍後重試 |
+
+    ### 服務端
+
+    | HTTP | reason | 什麼情況會拿到 |
+    | --- | --- | --- |
+    | 429 | `system.exhausted` | 觸發了容量保護，**請求並未送出**，可直接重試 |
+    | 500 | `data.unhandled` | 資料層未預期的錯誤 |
+    | 500 | `http.unknown` | API 層未預期的錯誤 |
+    | 500 | `system.unknown` | 系統層未預期的錯誤 |
+    | 503 | `http.unavailable` | 後端服務連不上 |
+    | 503 | `license.invalid` | 本次部署的授權無效或已過期 |
+    | 504 | `http.timeout` | 後端在時限內沒有回應。可能是模型排隊過久，重試前建議先退避 |
+servers:
+  - description: API
+    url: /api
+security: []
+paths:
+  /*:
+    get:
+      summary: （這不是真的端點）
+      description: |
+        **本站台沒有這個端點。**
+
+        swagger-ui 的分頁至少要有一條 path 才會被渲染出來，這裡放一條佔位用的 `/*`，好讓共通的 `Error` schema 出現在本頁下方的 Schemas 區塊，供其他分頁的錯誤回應引用。
+
+        真正要打的 API 請看左上角分頁選單裡的其他頁。
+      responses:
+        '500':
+          description: 錯誤回應的共通格式，所有分頁的錯誤都長這樣
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+components:
+  schemas:
+    Error:
+      type: object
+      description: |
+        所有錯誤回應的共通格式。`reason` 的完整清單與觸發情境見 Common 分頁。
+      required:
+        - service
+        - reason
+        - message
+      properties:
+        service:
+          type: string
+          description: |
+            產生這個錯誤的後端元件名。回報問題時附上它，可以直接定位到是哪個服務出錯——也是判斷 `reason` 屬於哪一組命名空間的依據。
+          example: http-gateway
+        reason:
+          type: string
+          description: |
+            錯誤代碼。**程式請用這個欄位做分支**，不要去解析 `message`。
+          example: data.validation
+        message:
+          type: string
+          description: |
+            人類可讀的錯誤說明。**措辭與內容不保證穩定**，可能隨版本改變，不要拿來做程式判斷。
+          example: invalid request body
+        field:
+          type: string
+          description: |
+            造成錯誤的欄位名，主要由 `data.validation` 帶上。**不是每個錯誤都有**——沒有的時候這個欄位整個不會出現在回應裡。
+          example: convId

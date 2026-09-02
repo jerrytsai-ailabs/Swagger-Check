@@ -17,14 +17,34 @@
   - SI 廠商（依 Swagger 串接）
   - 我們的 PJM（驗收 / 對外溝通窗口）
 - **本階段範圍**：**功能正確性檢查為主，壓力/效能測試不在範疇內。**
-- **輸入來源**：Public Swagger 頁面。
+- **輸入來源**：Public Swagger 頁面 — <https://fedgpt-dev.corp.ailabs.tw/swagger/>（dev 環境，`info.version: latest`，跟得上最新開發進度）。
 
 ---
 
 ## 2. Agent 設計
 
 ### 2.1 輸入
-- Public Swagger spec（透過提供的 Swagger 頁面取得，格式待確認：OpenAPI JSON/YAML 匯出或直接讀取頁面）。
+
+實測 <https://fedgpt-dev.corp.ailabs.tw/swagger/> 後確認：這不是單一份 spec，Swagger UI 的 `swagger-initializer.js` 指向 **12 份獨立、自包含的 OpenAPI 3.1.0 YAML**（`$ref` 只指向自己檔案內的 `#/components/...`，沒有跨檔案引用，可直接個別解析）：
+
+| 分頁 | 檔案（`/swagger/docs/` 下） | 性質 |
+|---|---|---|
+| Common | `0.yaml` | 共通規則說明（錯誤格式、`reason` 對照表），非真實端點 |
+| SSE 串流 | `sse.yaml` | 串流格式說明，非真實端點 |
+| Admin V1 | `admin-v1.yaml` | 真實端點 |
+| Asset V2 | `asset-v2.yaml` | 真實端點 |
+| Asura V1 | `asura-v1.yaml` | 真實端點 |
+| Auth V2 | `auth-v2.yaml` | 真實端點 |
+| Chat V2 | `chat-v2.yaml` | 真實端點 |
+| FAQ V1 | `faq-v1.yaml` | 真實端點 |
+| FedFlow V1 | `fedflow-v1.yaml` | 真實端點 |
+| Helix V1 | `helix-v1.yaml` | 真實端點 |
+| Knowledge V3 | `knowledge-v3.yaml` | 真實端點 |
+| LLM V1 | `llm-v1.yaml` | 真實端點 |
+
+實際功能端點規模：約 **57 個 path、75 個 operation**（10 個功能分頁加總，不含 Common / SSE 兩個文件用分頁）。
+
+Agent 的輸入方式：直接對這 12 個 URL 發 HTTP GET 抓 YAML，不需要爬 Swagger UI 渲染後的畫面（渲染用的 JS/CSS 資源在沒有 VPN 路由的環境會抓不到，但 spec 本身用一般 HTTP client 直接打得到）。
 
 ### 2.2 檢查流程（第一階段：靜態比對）
 - **本階段只做「靜態比對 Swagger 定義本身的正確性」**，不實際呼叫 API 驗證行為（不做 live call 測試）。
@@ -52,6 +72,8 @@
 | API 向下相容（自 3.10 起） | **待取得 3.10 版本 Swagger 後**，以 3.10 為 baseline 與目前版本做 diff，找出破壞性變更（本階段尚未啟動，見第 4 節） |
 
 > 待釐清：需要與 James Yang review 確認，哪些規則第一階段就能做到「純靜態比對」、哪些其實仍需要 live call 才能驗證。
+
+**補充發現**：實測發現幾乎所有端點都遵循 `/public/{service}/v{n}/...` 的命名慣例，這可以當作「這支算不算 public」的判斷依據之一。但也發現一個例外：`fedflow-v1.yaml` 同時有 `/public/fedflow/v1/flows/summary` 與不帶 `/public/` 前綴的 `/fedflow/v1/flows/summary`，經確認這是**刻意保留的相容路徑**，description 裡有明講「無前綴那條是早期整合留下的相容路徑，新接的整合請用帶 `/public` 前綴的那條」。這代表檢查規則不能只看「有沒有 `/public/` 前綴」，還要能分辨「有註明原因的例外」跟「真的漏標／漏寫」，避免誤判。
 
 ---
 
@@ -87,8 +109,8 @@
 
 ## 待確認 / Open Questions
 
-1. Public Swagger 頁面的具體連結與格式（OpenAPI JSON/YAML？可否直接下載）— Jerry 提供中。
-2. 3.10 版本 Swagger 何時可以取得。
+1. ~~Public Swagger 頁面的具體連結與格式~~ — 已確認：<https://fedgpt-dev.corp.ailabs.tw/swagger/>，OpenAPI 3.1.0 YAML，共 12 份可直接 HTTP GET 下載。**新待確認**：dev 環境（`version: latest`）是否等同 Nina 要的「Public Swagger」本人？跟正式環境對外曝露的版本是否有落差、要不要改盯正式環境。
+2. 3.10 版本 Swagger 何時可以取得（連結、環境同上待確認）。
 3. Jira 開票的目標 project、issue type、必填欄位規則。
 4. HTML report 的呈現內容與對象（給 PJM 看？給開發看？）。
 5. Live call 驗證（第二階段）的啟動時機與範圍。

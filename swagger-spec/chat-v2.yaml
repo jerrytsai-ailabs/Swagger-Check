@@ -1,0 +1,2952 @@
+openapi: 3.1.0
+info:
+  version: latest
+  title: FedGPT Chat V2 API
+  description: |
+    跟 FedGPT 對話的 API。**一定要先建立對話（conversation），才能送訊息**——對話決定了要用哪個模型、哪種模式、以及模式要吃的資源（知識庫、FAQ、表格…）。
+
+    ## 三步流程
+
+    ### 1. 挑一個模型
+
+    `GET /public/chat/v2/models` 拿到可用清單。**要填進對話的是 `id`，不是 `displayName`**——`displayName` 是給人看的。
+
+    ### 2. 建立對話
+
+    `POST /public/chat/v2/conversations`，帶 `mode`、`model`、以及該 mode 需要的 `params`。各 mode 的 `params` 規則見 `ConvParams`。回傳的 `convId` 是後續每次送訊息都要帶的。
+
+    ### 3. 送訊息
+
+    `POST /public/chat/v2/chat/{mode}`（一次回完）或 `POST /public/chat/v2/chat/{mode}:stream`（SSE 逐段回）。
+
+    ⚠️ **路徑上的 mode 用 camelCase，但 `conversation.mode` 的值用 kebab-case。** 兩者不是同一種寫法：
+
+    | 端點路徑 | 建立對話時要填的 `mode` |
+    | --- | --- |
+    | `/chat/normal` | `normal` |
+    | `/chat/knowledge` | `knowledge` |
+    | `/chat/agenticRag` | **`agentic-rag`** |
+    | `/chat/faq` | `faq` |
+    | `/chat/tabular` | `tabular` |
+
+    照著路徑猜 mode 值（填成 `agenticRag`）會拿到 `400 data.validation: invalid conversation mode`。
+
+    ## 五種模式的資源
+
+    | mode | `params` 要填什麼 | 資源從哪查 |
+    | --- | --- | --- |
+    | `normal` | **必須留空** | — |
+    | `knowledge` | 至少 1 個 knowledge ID | `GET /public/chat/v2/knowledges` |
+    | `agentic-rag` | 至少 1 個 knowledge ID（與 `knowledge` 同一組規則） | 同上 |
+    | `faq` | 至少 1 個 FAQ ID | `GET /public/chat/v2/faqs` |
+    | `tabular` | **恰好 1 個** tabular ID | `GET /public/chat/v2/tabulars` |
+
+    `params` 裡的每個 ID 都要有 `chat` 權限，缺任何一個就整個請求失敗（`403 auth.forbidden`，訊息會列出是哪幾個）。
+
+    ## 本頁沒有的兩種模式
+
+    `ConvMode` 還收 `agent` 與 `flow`，但**送訊息的端點不在這一頁**：
+
+    - **`agent`** —— 對話在這裡建立，訊息要送到 Flowise V3 分頁的 `POST /chat/v2/chat/agent`（**沒有 `/public` 前綴**）。`params` 填恰好 1 個 agent ID；找不到 agent 時會再當成 flow ID 試一次。
+    - **`flow`** —— 需要部署端開啟 `ENABLE_FLOW_MODE`（**預設關閉**），沒開會拿到 `400 data.validation: flow mode is not enabled`。`params` 填恰好 1 個 flow ID。**這個模式不驗證 `model`**，LLM 由 FedFlow 那邊決定。
+
+    ## 串流
+
+    `:stream` 版本以 `text/event-stream` 回應。事件格式、heartbeat、錯誤處理見 **SSE 串流** 分頁的「方言 A」——**特別注意串流一旦開始 HTTP status code 就固定是 200**，錯誤是以 `event: error` 送在串流裡。
+servers:
+  - description: API
+    url: /api
+security:
+  - ApiKeyAuth: []
+  - AccessToken: []
+tags:
+  - name: conversation
+    description: 對話的建立、查詢、更新與刪除。送訊息之前一定要先有對話。
+  - name: chat
+    description: 送訊息。每個 mode 一條端點，各有一次回完與 `:stream` 兩種版本。
+  - name: resource
+    description: 查可用的模型與各模式要吃的資源（知識庫、FAQ、表格）。建立對話前用來取得要填進 `model` 與 `params` 的值。
+paths:
+  /public/chat/v2/conversations:
+    get:
+      tags:
+        - conversation
+      summary: 列出對話
+      description: |
+        列出你的對話，新的在前。**標題只回前 30 個字**，完整標題要打單一對話的端點。
+
+        翻頁用 `cursor`：第一次不要帶，之後每次填上一頁回傳的 `nextCursor`；沒有 `nextCursor` 就代表沒有下一頁。
+      parameters:
+        - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/cursor'
+      responses:
+        '200':
+          description: 對話列表
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - conversations
+                properties:
+                  conversations:
+                    type: array
+                    description: |
+                      這一頁的對話，不含訊息內容。
+                    items:
+                      $ref: '#/components/schemas/Conversation'
+                  nextCursor:
+                    type: string
+                    description: |
+                      下一頁的游標。**沒有這個欄位就代表已經是最後一頁。**
+                    example: Ol5dPKnifWCkroZ0UjvvG
+    post:
+      tags:
+        - conversation
+      summary: 建立對話
+      description: |
+        建立一個對話。**送訊息之前一定要先做這一步**——`mode`、`model` 與 `params` 都在這裡決定，之後不能改。
+
+        三件容易踩的事：
+
+        1. **`mode` 用 kebab-case**，與端點路徑的 camelCase 不同（`agentic-rag` vs `/chat/agenticRag`）。
+        2. **`model` 填 `GET /public/chat/v2/models` 回傳的 `id`**，不是 `displayName`。`flow` 以外的模式都必填。
+        3. **`params` 的數量依 `mode` 而定**，而且裡面每個 ID 都要有 `chat` 權限——缺一個就整個請求失敗。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - conversation
+              properties:
+                conversation:
+                  $ref: '#/components/schemas/ConversationCreate'
+      responses:
+        '200':
+          description: 建立成功，回傳新對話的 ID
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - conversation
+                properties:
+                  conversation:
+                    type: object
+                    required:
+                      - convId
+                    properties:
+                      convId:
+                        type: string
+                        description: |
+                          新對話的識別碼。後續送訊息都要帶它。
+                        example: 3098643a-fd87-4c1b-bc45-c76d8d36a96a
+        '400':
+          description: |
+            `mode` 不合法、`params` 數量不對、`model` 不存在，或用了不允許的模型（`reason` 為 `data.validation`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: |
+            `params` 裡有你沒有 `chat` 權限的資源（`reason` 為 `auth.forbidden`，`message` 會列出是哪幾個 ID）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: |
+            `params` 裡有不存在的資源 ID（`reason` 為 `data.not-found`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /public/chat/v2/conversations/{convId}:
+    get:
+      tags:
+        - conversation
+      summary: 取得單一對話
+      description: |
+        取得一個對話的中介資料，**含完整標題**（列表端點只回前 30 個字）。訊息內容要另外打 `/messages`。
+      parameters:
+        - $ref: '#/components/parameters/convId'
+      responses:
+        '200':
+          description: 對話的中介資料
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - conversation
+                properties:
+                  conversation:
+                    $ref: '#/components/schemas/Conversation'
+        '404':
+          description: |
+            對話不存在（`reason` 為 `data.not-found`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    put:
+      tags:
+        - conversation
+      summary: 更新對話標題
+      description: |
+        **只能改標題。** `mode`、`model`、`params` 建立後都不可變更——要換就開一個新對話。
+      parameters:
+        - $ref: '#/components/parameters/convId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - conversation
+              properties:
+                conversation:
+                  $ref: '#/components/schemas/ConversationUpdate'
+      responses:
+        '200':
+          description: 更新成功，回傳空物件
+          content:
+            application/json:
+              schema:
+                type: object
+        '404':
+          description: |
+            對話不存在（`reason` 為 `data.not-found`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    delete:
+      tags:
+        - conversation
+      summary: 刪除對話
+      description: |
+        刪除一個對話**及其所有訊息**。無法復原。
+      parameters:
+        - $ref: '#/components/parameters/convId'
+      responses:
+        '200':
+          description: 刪除成功，回傳空物件
+          content:
+            application/json:
+              schema:
+                type: object
+        '404':
+          description: |
+            對話不存在（`reason` 為 `data.not-found`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /public/chat/v2/conversations/{convId}/messages:
+    get:
+      tags:
+        - conversation
+      summary: 列出對話中的訊息
+      description: |
+        取得一個對話的訊息。**預設新的在前**（`order` 預設 `-created_at`）。
+
+        翻頁用 `cursor` 搭配 `nextCursor`。要往回翻的話，把 `prevCursor` 配上**相反的 `order`** 再打一次。
+
+        **`flow` 模式的對話回的是另一組欄位**（`flowMessages`），見下方說明。
+      parameters:
+        - $ref: '#/components/parameters/convId'
+        - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/cursor'
+        - $ref: '#/components/parameters/order'
+      responses:
+        '200':
+          description: 這一頁的訊息
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - messages
+                  - nextCursor
+                  - prevCursor
+                properties:
+                  messages:
+                    type: array
+                    description: |
+                      這一頁的訊息。**`flow` 模式的對話這裡會是空陣列**，內容改放在 `flowMessages`。
+                    items:
+                      $ref: '#/components/schemas/Message'
+                  nextCursor:
+                    type: string
+                    description: |
+                      下一頁的游標，沿用同一個 `order`。
+                    example: Ol5dPKnifWCkroZ0UjvvG
+                  prevCursor:
+                    type: string
+                    description: |
+                      往回翻的游標。**要搭配相反的 `order` 使用**，否則會拿到同一頁。
+                    example: dfd9f610bd644487af4a
+                  flowMessages:
+                    type: object
+                    description: |
+                      **只有 `flow` 模式的對話才有這個欄位**，裡面是 FedFlow 原生格式的訊息。有它的時候 `messages` 會是空的。
+                    properties:
+                      items:
+                        type: array
+                        description: |
+                          FedFlow 格式的訊息。
+                        items:
+                          $ref: '#/components/schemas/ChatMessageResponse'
+                      stream:
+                        type: object
+                        description: |
+                          要接上的事件串流。
+
+                          **「有沒有這個欄位」本身就是判斷依據**：沒有它就代表沒有串流可接，**不要**改從執行狀態或訊息歷史去推論。
+                        properties:
+                          streamId:
+                            type: string
+                            description: |
+                              串流的識別碼。**內容不透明，不要解析**——開串流或送出輸入時原封當作 `streamId` 查詢參數帶回去。
+                            example: 8K65Qr3rRxyv116m2CP0Z
+                          taskId:
+                            type: string
+                            description: |
+                              這次執行的工作編號，給人看的。
+                            example: T000000229
+                      lastRun:
+                        type: object
+                        description: |
+                          訊息歷史最後那一次執行是怎麼結束的，**純粹給畫面用**——用來把「還沒人回應就被中斷的卡片」顯示成中斷而不是單純結束。
+
+                          **不要拿它判斷要不要接串流**，那是 `stream` 欄位的事。對話歷史裡沒有任何執行時，這個欄位不會出現。
+                        properties:
+                          endedAbnormally:
+                            type: boolean
+                            description: |
+                              `true` 代表那次執行是被中止、失敗或逾時結束的。
+                            example: false
+                  processingMessageId:
+                    type: string
+                    description: |
+                      還在處理中的那則訊息的 ID。有值代表內容還會再更新，可以繼續輪詢或改接串流。
+                    example: 50b3eae9-3ac7-417d-ac70-171b60d0554f
+        '404':
+          description: |
+            對話不存在（`reason` 為 `data.not-found`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /public/chat/v2/chat/normal:
+    post:
+      tags:
+        - chat
+      summary: 送訊息（一次回完）
+      description: |
+        送一則訊息並等模型把整段回答產生完才回應。**要等的時間跟回答長度成正比**，長回答容易撞到連線逾時——想要逐段顯示請改用同名的 `:stream` 端點。
+
+        路徑最後一段要對應對話建立時填的 `mode`（注意路徑是 camelCase、`mode` 值是 kebab-case，例如 `/chat/agenticRag` 對 `agentic-rag`）。**打錯對應的端點不會報錯，但會用錯的模式回答。**
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatRequest'
+      responses:
+        '200':
+          description: 這一輪產生的訊息
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatResponse'
+        '400':
+          description: |
+            `convId` 不存在、對話已停用，或 `message` 不合法（`reason` 為 `data.validation`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: |
+            沒有這個對話所引用資源的 `chat` 權限（`reason` 為 `auth.forbidden`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /public/chat/v2/chat/knowledge:
+    post:
+      tags:
+        - chat
+      summary: 送訊息（一次回完）
+      description: |
+        送一則訊息並等模型把整段回答產生完才回應。**要等的時間跟回答長度成正比**，長回答容易撞到連線逾時——想要逐段顯示請改用同名的 `:stream` 端點。
+
+        路徑最後一段要對應對話建立時填的 `mode`（注意路徑是 camelCase、`mode` 值是 kebab-case，例如 `/chat/agenticRag` 對 `agentic-rag`）。**打錯對應的端點不會報錯，但會用錯的模式回答。**
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatRequest'
+      responses:
+        '200':
+          description: 這一輪產生的訊息
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatResponse'
+        '400':
+          description: |
+            `convId` 不存在、對話已停用，或 `message` 不合法（`reason` 為 `data.validation`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: |
+            沒有這個對話所引用資源的 `chat` 權限（`reason` 為 `auth.forbidden`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /public/chat/v2/chat/agenticRag:
+    post:
+      tags:
+        - chat
+      summary: 送訊息（一次回完）
+      description: |
+        送一則訊息並等模型把整段回答產生完才回應。**要等的時間跟回答長度成正比**，長回答容易撞到連線逾時——想要逐段顯示請改用同名的 `:stream` 端點。
+
+        路徑最後一段要對應對話建立時填的 `mode`（注意路徑是 camelCase、`mode` 值是 kebab-case，例如 `/chat/agenticRag` 對 `agentic-rag`）。**打錯對應的端點不會報錯，但會用錯的模式回答。**
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatRequest'
+      responses:
+        '200':
+          description: 這一輪產生的訊息
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatResponse'
+        '400':
+          description: |
+            `convId` 不存在、對話已停用，或 `message` 不合法（`reason` 為 `data.validation`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: |
+            沒有這個對話所引用資源的 `chat` 權限（`reason` 為 `auth.forbidden`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /public/chat/v2/chat/faq:
+    post:
+      tags:
+        - chat
+      summary: 送訊息（一次回完）
+      description: |
+        送一則訊息並等模型把整段回答產生完才回應。**要等的時間跟回答長度成正比**，長回答容易撞到連線逾時——想要逐段顯示請改用同名的 `:stream` 端點。
+
+        路徑最後一段要對應對話建立時填的 `mode`（注意路徑是 camelCase、`mode` 值是 kebab-case，例如 `/chat/agenticRag` 對 `agentic-rag`）。**打錯對應的端點不會報錯，但會用錯的模式回答。**
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatRequest'
+      responses:
+        '200':
+          description: 這一輪產生的訊息
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatResponse'
+        '400':
+          description: |
+            `convId` 不存在、對話已停用，或 `message` 不合法（`reason` 為 `data.validation`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: |
+            沒有這個對話所引用資源的 `chat` 權限（`reason` 為 `auth.forbidden`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /public/chat/v2/chat/tabular:
+    post:
+      tags:
+        - chat
+      summary: 送訊息（一次回完）
+      description: |
+        送一則訊息並等模型把整段回答產生完才回應。**要等的時間跟回答長度成正比**，長回答容易撞到連線逾時——想要逐段顯示請改用同名的 `:stream` 端點。
+
+        路徑最後一段要對應對話建立時填的 `mode`（注意路徑是 camelCase、`mode` 值是 kebab-case，例如 `/chat/agenticRag` 對 `agentic-rag`）。**打錯對應的端點不會報錯，但會用錯的模式回答。**
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatRequest'
+      responses:
+        '200':
+          description: 這一輪產生的訊息
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatResponse'
+        '400':
+          description: |
+            `convId` 不存在、對話已停用，或 `message` 不合法（`reason` 為 `data.validation`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: |
+            沒有這個對話所引用資源的 `chat` 權限（`reason` 為 `auth.forbidden`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /public/chat/v2/chat/normal:stream:
+    post:
+      tags:
+        - chat
+      summary: 送訊息（串流）
+      description: |
+        與同名的非串流端點做同一件事，但以 SSE 逐段回傳，適合要即時顯示打字效果的介面。
+
+        每一則 `event: data` 帶一個 `ChatResponse`，內容會隨著模型產生而增長。**注意 `overwrite`**：為 `true` 時代表這一份要取代先前同 `messageId` 的訊息，而不是接在後面。
+
+        ⚠️ **串流一旦開始，HTTP status code 就固定是 `200`。** 中途失敗是以 `event: error` 送在串流裡，不會反映在 status code 上。事件格式、heartbeat 與錯誤處理見 **SSE 串流** 分頁的「方言 A」。
+
+        下面標的 `4xx` 只會發生在**串流開始之前**（例如 `convId` 不存在）。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatRequest'
+      responses:
+        '200':
+          description: |
+            SSE 串流。每則 `event: data` 帶一個 `ChatResponse`；失敗時最後一則是 `event: error`，帶 `Error` 物件。
+          content:
+            text/event-stream:
+              schema:
+                $ref: '#/components/schemas/ChatResponse'
+        '400':
+          description: |
+            串流開始前就失敗：`convId` 不存在、對話已停用，或 `message` 不合法
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: |
+            沒有這個對話所引用資源的 `chat` 權限
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /public/chat/v2/chat/knowledge:stream:
+    post:
+      tags:
+        - chat
+      summary: 送訊息（串流）
+      description: |
+        與同名的非串流端點做同一件事，但以 SSE 逐段回傳，適合要即時顯示打字效果的介面。
+
+        每一則 `event: data` 帶一個 `ChatResponse`，內容會隨著模型產生而增長。**注意 `overwrite`**：為 `true` 時代表這一份要取代先前同 `messageId` 的訊息，而不是接在後面。
+
+        ⚠️ **串流一旦開始，HTTP status code 就固定是 `200`。** 中途失敗是以 `event: error` 送在串流裡，不會反映在 status code 上。事件格式、heartbeat 與錯誤處理見 **SSE 串流** 分頁的「方言 A」。
+
+        下面標的 `4xx` 只會發生在**串流開始之前**（例如 `convId` 不存在）。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatRequest'
+      responses:
+        '200':
+          description: |
+            SSE 串流。每則 `event: data` 帶一個 `ChatResponse`；失敗時最後一則是 `event: error`，帶 `Error` 物件。
+          content:
+            text/event-stream:
+              schema:
+                $ref: '#/components/schemas/ChatResponse'
+        '400':
+          description: |
+            串流開始前就失敗：`convId` 不存在、對話已停用，或 `message` 不合法
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: |
+            沒有這個對話所引用資源的 `chat` 權限
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /public/chat/v2/chat/agenticRag:stream:
+    post:
+      tags:
+        - chat
+      summary: 送訊息（串流）
+      description: |
+        與同名的非串流端點做同一件事，但以 SSE 逐段回傳，適合要即時顯示打字效果的介面。
+
+        每一則 `event: data` 帶一個 `ChatResponse`，內容會隨著模型產生而增長。**注意 `overwrite`**：為 `true` 時代表這一份要取代先前同 `messageId` 的訊息，而不是接在後面。
+
+        ⚠️ **串流一旦開始，HTTP status code 就固定是 `200`。** 中途失敗是以 `event: error` 送在串流裡，不會反映在 status code 上。事件格式、heartbeat 與錯誤處理見 **SSE 串流** 分頁的「方言 A」。
+
+        下面標的 `4xx` 只會發生在**串流開始之前**（例如 `convId` 不存在）。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatRequest'
+      responses:
+        '200':
+          description: |
+            SSE 串流。每則 `event: data` 帶一個 `ChatResponse`；失敗時最後一則是 `event: error`，帶 `Error` 物件。
+          content:
+            text/event-stream:
+              schema:
+                $ref: '#/components/schemas/ChatResponse'
+        '400':
+          description: |
+            串流開始前就失敗：`convId` 不存在、對話已停用，或 `message` 不合法
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: |
+            沒有這個對話所引用資源的 `chat` 權限
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /public/chat/v2/chat/faq:stream:
+    post:
+      tags:
+        - chat
+      summary: 送訊息（串流）
+      description: |
+        與同名的非串流端點做同一件事，但以 SSE 逐段回傳，適合要即時顯示打字效果的介面。
+
+        每一則 `event: data` 帶一個 `ChatResponse`，內容會隨著模型產生而增長。**注意 `overwrite`**：為 `true` 時代表這一份要取代先前同 `messageId` 的訊息，而不是接在後面。
+
+        ⚠️ **串流一旦開始，HTTP status code 就固定是 `200`。** 中途失敗是以 `event: error` 送在串流裡，不會反映在 status code 上。事件格式、heartbeat 與錯誤處理見 **SSE 串流** 分頁的「方言 A」。
+
+        下面標的 `4xx` 只會發生在**串流開始之前**（例如 `convId` 不存在）。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatRequest'
+      responses:
+        '200':
+          description: |
+            SSE 串流。每則 `event: data` 帶一個 `ChatResponse`；失敗時最後一則是 `event: error`，帶 `Error` 物件。
+          content:
+            text/event-stream:
+              schema:
+                $ref: '#/components/schemas/ChatResponse'
+        '400':
+          description: |
+            串流開始前就失敗：`convId` 不存在、對話已停用，或 `message` 不合法
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: |
+            沒有這個對話所引用資源的 `chat` 權限
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /public/chat/v2/chat/tabular:stream:
+    post:
+      tags:
+        - chat
+      summary: 送訊息（串流）
+      description: |
+        與同名的非串流端點做同一件事，但以 SSE 逐段回傳，適合要即時顯示打字效果的介面。
+
+        每一則 `event: data` 帶一個 `ChatResponse`，內容會隨著模型產生而增長。**注意 `overwrite`**：為 `true` 時代表這一份要取代先前同 `messageId` 的訊息，而不是接在後面。
+
+        ⚠️ **串流一旦開始，HTTP status code 就固定是 `200`。** 中途失敗是以 `event: error` 送在串流裡，不會反映在 status code 上。事件格式、heartbeat 與錯誤處理見 **SSE 串流** 分頁的「方言 A」。
+
+        下面標的 `4xx` 只會發生在**串流開始之前**（例如 `convId` 不存在）。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatRequest'
+      responses:
+        '200':
+          description: |
+            SSE 串流。每則 `event: data` 帶一個 `ChatResponse`；失敗時最後一則是 `event: error`，帶 `Error` 物件。
+          content:
+            text/event-stream:
+              schema:
+                $ref: '#/components/schemas/ChatResponse'
+        '400':
+          description: |
+            串流開始前就失敗：`convId` 不存在、對話已停用，或 `message` 不合法
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: |
+            沒有這個對話所引用資源的 `chat` 權限
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /public/chat/v2/models:
+    get:
+      tags:
+        - resource
+      summary: 列出可用的模型
+      description: |
+        列出目前上線可用的模型。**建立對話前先打這一支**——`conversation.model` 只接受這裡回傳的 `id`。
+
+        清單會隨部署的模型異動，不要寫死在程式裡。
+      responses:
+        '200':
+          description: 可用的模型清單
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - models
+                properties:
+                  models:
+                    type: array
+                    description: |
+                      可用的模型。`type: lora` 的自訂模型**只能用在 `normal` mode**。
+                    items:
+                      $ref: '#/components/schemas/Model'
+  /public/chat/v2/knowledges:
+    get:
+      tags:
+        - resource
+      summary: 列出可用的知識庫
+      description: |
+        列出你有 `chat` 權限的知識庫。**建立 `mode: knowledge/agentic-rag` 的對話前先打這一支**，把回傳的 ID 填進 `params`。
+
+        只會列出你有權限的項目，所以清單裡的 ID 拿去建立對話一定不會踩到權限錯誤。
+      responses:
+        '200':
+          description: 可用的知識庫清單
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - knowledges
+                properties:
+                  knowledges:
+                    type: array
+                    description: |
+                      你有 `chat` 權限的知識庫。
+                    items:
+                      $ref: '#/components/schemas/Knowledge'
+  /public/chat/v2/faqs:
+    get:
+      tags:
+        - resource
+      summary: 列出可用的FAQ
+      description: |
+        列出你有 `chat` 權限的FAQ。**建立 `mode: faq` 的對話前先打這一支**，把回傳的 ID 填進 `params`。
+
+        只會列出你有權限的項目，所以清單裡的 ID 拿去建立對話一定不會踩到權限錯誤。
+      responses:
+        '200':
+          description: 可用的FAQ清單
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - faqs
+                properties:
+                  faqs:
+                    type: array
+                    description: |
+                      你有 `chat` 權限的FAQ。
+                    items:
+                      $ref: '#/components/schemas/FAQ'
+  /public/chat/v2/tabulars:
+    get:
+      tags:
+        - resource
+      summary: 列出可用的表格資料庫
+      description: |
+        列出你有 `chat` 權限的表格資料庫。**建立 `mode: tabular` 的對話前先打這一支**，把回傳的 ID 填進 `params`。
+
+        只會列出你有權限的項目，所以清單裡的 ID 拿去建立對話一定不會踩到權限錯誤。
+      responses:
+        '200':
+          description: 可用的表格資料庫清單
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - tabulars
+                properties:
+                  tabulars:
+                    type: array
+                    description: |
+                      你有 `chat` 權限的表格資料庫。
+                    items:
+                      $ref: '#/components/schemas/Tabular'
+components:
+  schemas:
+    ConvMode:
+      type: string
+      description: |
+        對話模式，建立後不可變更。
+
+        ⚠️ **這裡的值與端點路徑的寫法不同**：路徑用 camelCase（`/chat/agenticRag`），本欄位用 kebab-case（`agentic-rag`）。填成 `agenticRag` 會被拒。
+
+        | 值 | 送訊息的端點 | `params` |
+        | --- | --- | --- |
+        | `normal` | `/public/chat/v2/chat/normal` | 必須留空 |
+        | `knowledge` | `/public/chat/v2/chat/knowledge` | 至少 1 個 knowledge ID |
+        | `agentic-rag` | `/public/chat/v2/chat/agenticRag` | 至少 1 個 knowledge ID |
+        | `faq` | `/public/chat/v2/chat/faq` | 至少 1 個 FAQ ID |
+        | `tabular` | `/public/chat/v2/chat/tabular` | 恰好 1 個 tabular ID |
+        | `agent` | **Flowise V3 分頁**的 `/chat/v2/chat/agent` | 恰好 1 個 agent ID |
+        | `flow` | 不在本站台文件範圍 | 恰好 1 個 flow ID |
+
+        `flow` 需要部署端開啟 `ENABLE_FLOW_MODE`（預設關閉）。
+      enum:
+        - normal
+        - knowledge
+        - agentic-rag
+        - faq
+        - tabular
+        - agent
+        - flow
+      example: knowledge
+    ConvParams:
+      type: array
+      items:
+        type: string
+      description: |
+        這個對話要吃的資源 ID，內容依 `mode` 而定。**數量不對會直接回 `400 data.validation`。**
+
+        | mode | 規則 | ID 從哪查 |
+        | --- | --- | --- |
+        | `normal` | **必須是空陣列**（給了值會被拒） | — |
+        | `knowledge` | **至少 1 個** knowledge ID | `GET /public/chat/v2/knowledges` |
+        | `agentic-rag` | **至少 1 個** knowledge ID（與 `knowledge` 同一組規則） | 同上 |
+        | `faq` | **至少 1 個** FAQ ID | `GET /public/chat/v2/faqs` |
+        | `tabular` | **恰好 1 個** tabular ID | `GET /public/chat/v2/tabulars` |
+        | `agent` | **恰好 1 個** agent ID（找不到 agent 時會再當成 flow ID 試一次） | Flowise V3 分頁 |
+        | `flow` | **恰好 1 個** flow ID | 同上 |
+
+        每個 ID 都要有 `chat` 權限。缺任何一個就整個請求失敗，回 `403 auth.forbidden`，訊息會列出是哪幾個 ID。ID 存在但你沒權限、與 ID 根本不存在（`404 data.not-found`）是兩種不同的錯誤。
+      example:
+        - Ol5dPKnifWCkroZ0UjvvG
+    ConvPreferences:
+      type: object
+      description: |
+        傳給模型的情境資訊，讓回答能配合使用者的時區與所在地（例如「明天」是哪一天、當地的法規或幣別）。
+
+        ⚠️ **送出與讀回的欄位名不一樣**：建立對話時填 `preferences`（複數），但查詢對話時回來的是 `preference`（單數）。這是既有行為，不是筆誤。
+      properties:
+        timezone:
+          type: string
+          description: |
+            IANA 時區名稱。
+          example: Asia/Taipei
+        location:
+          type: string
+          description: |
+            使用者所在地。自由文字，不是 enum。
+          example: 台灣
+    Conversation:
+      type: object
+      description: |
+        對話的中介資料。查詢對話列表時回傳的就是這個形狀，**不含訊息內容**——訊息要另外打 `GET /public/chat/v2/conversations/{convId}/messages`。
+      required:
+        - convId
+        - createdAt
+        - title
+        - model
+        - mode
+        - disabled
+        - executionStatus
+      properties:
+        convId:
+          type: string
+          description: |
+            對話的識別碼，建立對話時由系統產生。後續每次送訊息都要帶它。
+          example: 3098643a-fd87-4c1b-bc45-c76d8d36a96a
+        createdAt:
+          type: integer
+          description: |
+            建立時間，Unix 秒數。
+          example: 1719504000
+        title:
+          type: string
+          description: |
+            對話標題。上限 100,000 字元，但**建議 30 字以內**——太長在列表上會被截斷。
+          example: 請幫我擬一份三年財務計畫
+        model:
+          type: string
+          description: |
+            這個對話使用的模型 ID。填的是 `GET /public/chat/v2/models` 回傳的 `id`（不是 `displayName`）。
+          example: fedgpt-moe-1.10.14
+        updatedAt:
+          type: integer
+          description: |
+            最後更新時間，Unix 秒數。
+          example: 1719504000
+        mode:
+          $ref: '#/components/schemas/ConvMode'
+        params:
+          $ref: '#/components/schemas/ConvParams'
+        preference:
+          $ref: '#/components/schemas/ConvPreferences'
+        disabled:
+          type: boolean
+          description: |
+            對話是否已因過期而停用。`true` 之後就不能再送新訊息，只能讀歷史。
+          example: false
+        executionStatus:
+          type: string
+          description: |
+            對話目前的執行狀態。**只有 `done` 與 `error` 是終態**，其餘三種代表還在進行中。
+
+            | 值 | 意思 |
+            | --- | --- |
+            | `running` | 正在產生回應 |
+            | `done` | 這一輪結束 |
+            | `error` | 這一輪失敗 |
+            | `waitingHumanInputType1` | 停下來等**在對話裡**核准或駁回（送 `humanInput` 繼續） |
+            | `waitingHumanInputType2` | 停下來等**email 回覆**，不是在對話裡操作 |
+
+            兩種 `waitingHumanInput` 都只會出現在 `agent` mode 的 flow 有 human-in-the-loop 節點時。
+          enum:
+            - done
+            - error
+            - running
+            - waitingHumanInputType1
+            - waitingHumanInputType2
+          example: done
+        read:
+          type: boolean
+          description: |
+            使用者是否已讀這個對話。
+          example: false
+    ConversationCreate:
+      type: object
+      description: |
+        建立對話。`mode` 決定了 `params` 要填什麼、以及 `model` 是否必填。
+      required:
+        - mode
+      properties:
+        title:
+          type: string
+          description: |
+            對話標題。不填的話由系統帶入。
+          example: 請幫我擬一份三年財務計畫
+        model:
+          type: string
+          description: |
+            要用的模型 ID，**填 `GET /public/chat/v2/models` 回傳的 `id`**。
+
+            - **`flow` 以外的 mode 都必填**，且必須是清單裡實際存在的 `id`，否則回 `400 data.validation: model <值> is not found`。
+            - **`flow` mode 不驗證這個欄位**，LLM 由 FedFlow 決定。
+            - **`type: lora` 的自訂模型只能用在 `normal` mode**，其他 mode 會回 `400 data.validation: model <值> is not allowed in mode <mode>`。
+          example: fedgpt-moe-1.10.14
+        mode:
+          $ref: '#/components/schemas/ConvMode'
+        params:
+          $ref: '#/components/schemas/ConvParams'
+        preferences:
+          $ref: '#/components/schemas/ConvPreferences'
+    Error:
+      type: object
+      description: |
+        所有錯誤回應的共通格式。`reason` 的完整清單與觸發情境見 Common 分頁。
+      required:
+        - service
+        - reason
+        - message
+      properties:
+        service:
+          type: string
+          description: |
+            產生這個錯誤的後端元件名。回報問題時附上它，可以直接定位到是哪個服務出錯——也是判斷 `reason` 屬於哪一組命名空間的依據。
+          example: http-gateway
+        reason:
+          type: string
+          description: |
+            錯誤代碼。**程式請用這個欄位做分支**，不要去解析 `message`。
+          example: data.validation
+        message:
+          type: string
+          description: |
+            人類可讀的錯誤說明。**措辭與內容不保證穩定**，可能隨版本改變，不要拿來做程式判斷。
+          example: invalid request body
+        field:
+          type: string
+          description: |
+            造成錯誤的欄位名，主要由 `data.validation` 帶上。**不是每個錯誤都有**——沒有的時候這個欄位整個不會出現在回應裡。
+          example: convId
+    ConversationUpdate:
+      type: object
+      description: |
+        只能改標題。模式、模型與 params 建立後不可變更——要換就開新對話。
+      properties:
+        title:
+          type: string
+          description: |
+            新的對話標題。
+          example: 三年財務計畫（修訂版）
+    ContentAsset:
+      type: object
+      description: |
+        訊息裡夾帶的檔案（回應方向）。
+      properties:
+        type:
+          type: string
+          description: |
+            檔案的種類。
+          example: image
+        url:
+          type: string
+          description: |
+            可下載這個檔案的 URL。
+          example: https://demo.fedgpt.cc/asset/tmp/Ol5dPKnifWCkroZ0UjvvG
+        filename:
+          type: string
+          description: |
+            原始檔名。用 `key` 上傳的檔案，這個值會自動從 Asset V2 帶過來。
+          example: 年度財報.pdf
+    ContentReference:
+      type: object
+      description: |
+        這則回應引用到的知識庫來源。**只有 `knowledge` 與 `agentic-rag` 模式會有**——模型是根據哪幾段文字回答的，都列在這裡，可以拿來做「引用出處」的顯示。
+      properties:
+        kbId:
+          type: string
+          description: |
+            這段內容所屬的知識庫 ID。
+          example: Ol5dPKnifWCkroZ0UjvvG
+        docId:
+          type: string
+          description: |
+            這段內容所屬的文件 ID。
+          example: 8K65Qr3rRxyv116m2CP0Z
+        refId:
+          type: string
+          description: |
+            這筆引用在本次回應的引用清單裡的識別碼。回應正文中的引用標記會對應到它。
+          example: chunk:file_4:chunk_0
+        chunkId:
+          type: string
+          description: |
+            文件切段後的段落 ID。**已淘汰，請改用 `refId`。**
+          example: 8K65Qr3rRxyv116m2CP0Z
+          deprecated: true
+        fileName:
+          type: string
+          description: |
+            來源檔案的原始檔名。
+          example: 公司內部規章.pdf
+        content:
+          type: string
+          description: |
+            被引用的實際文字內容。
+          example: 出差申請須於出發前三個工作日完成線上簽核。
+        similarity:
+          type: number
+          description: |
+            這段內容與使用者問題的相似度。**數值範圍與計算方式由檢索模型決定，不要當成百分比**，只適合拿來排序或比較同一次回應內的幾筆引用。
+          example: 0.8214
+        fileMeta:
+          type: object
+          description: |
+            來源檔案的額外中介資料。內容依文件來源而異，沒有固定形狀。
+          additionalProperties: true
+    GuardianResult:
+      type: object
+      description: |
+        這則訊息的檢查分數。**分數一定會回，不管有沒有超過門檻**——超過門檻才會另外在訊息上標 `status`。
+      required:
+        - biasScore
+        - hallucinationScore
+      properties:
+        biasScore:
+          type: number
+          format: float
+          description: |
+            偏見分數，越高代表偏見程度越高。
+          example: 0.0032
+          minimum: 0
+          maximum: 1
+        hallucinationScore:
+          type: number
+          format: float
+          description: |
+            幻覺分數，越高代表越偏離提供的知識來源。沒有知識來源的模式下這個值沒有意義。
+          example: 0.2012
+          minimum: 0
+          maximum: 1
+    HumanInput:
+      type: object
+      description: |
+        使用者對 agent 提出的待辦動作所做的決定。
+      required:
+        - decision
+      properties:
+        decision:
+          type: string
+          description: |
+            `proceed` 是核准、讓 agent 繼續往下跑；`reject` 是駁回。
+          enum:
+            - proceed
+            - reject
+          example: proceed
+        content:
+          type: string
+          description: |
+            附帶的意見。選填，且只有在 `action.enableFeedback` 為 `true` 時才會顯示輸入框。
+          example: 金額沒問題，請繼續。
+    HumanInLoop:
+      type: object
+      description: |
+        agent 執行到一半停下來等人決定時，訊息上會帶這一段。
+
+        對話的 `executionStatus` 同時會是 `waitingHumanInputType1`（在對話裡等）或 `waitingHumanInputType2`（等 email 回覆）。**只有 type1 是在對話裡回覆的**——把決定放在下一次送訊息的 `humanInLoop.humanInput` 裡。
+      required:
+        - action
+        - humanInput
+      properties:
+        action:
+          type: object
+          description: |
+            要使用者決定的事情，以及按鈕該怎麼顯示。
+          required:
+            - content
+            - proceedLabel
+            - rejectLabel
+            - enableFeedback
+          properties:
+            content:
+              type: string
+              description: |
+                要使用者過目的內容，通常是 agent 準備執行的動作說明。
+              example: 即將寄出這封信給客戶，請確認內容。
+            proceedLabel:
+              type: string
+              description: |
+                核准按鈕上的文字。
+              example: 確認寄出
+            rejectLabel:
+              type: string
+              description: |
+                駁回按鈕上的文字。
+              example: 先不要
+            enableFeedback:
+              type: boolean
+              description: |
+                是否讓使用者附上一段意見（對應 `humanInput.content`）。
+              example: true
+        humanInput:
+          $ref: '#/components/schemas/HumanInput'
+    FormFieldValidation:
+      type: object
+      description: |
+        欄位的驗證規則。**由呼叫端在送出前自行檢查**，用來即時提示使用者。
+      properties:
+        minLength:
+          type: integer
+          description: |
+            文字最短長度。
+          example: 1
+        maxLength:
+          type: integer
+          description: |
+            文字最長長度。
+          example: 200
+        pattern:
+          type: string
+          description: |
+            文字要符合的正規表示式。
+          example: ^[0-9]{8}$
+        min:
+          type: number
+          description: |
+            數值下限。
+          example: 0
+        max:
+          type: number
+          description: |
+            數值上限。
+          example: 100000000
+        step:
+          type: number
+          description: |
+            數值的遞增間隔。
+          example: 1000
+    FormFieldOption:
+      type: object
+      description: |
+        `type: select` 的一個選項。
+      properties:
+        id:
+          type: string
+          description: |
+            選項的識別碼。
+          example: Ol5dPKnifWCkroZ0UjvvG
+        label:
+          type: string
+          description: |
+            顯示給使用者看的文字。
+          example: 保守型
+        value:
+          type: string
+          description: |
+            送回去時實際帶的值。
+          example: conservative
+    FormFileConfig:
+      type: object
+      description: |
+        `type: file` 欄位的限制。
+      properties:
+        accept:
+          type: array
+          description: |
+            允許的 MIME type 清單。空的代表不限制。
+          items:
+            type: string
+          example:
+            - application/pdf
+            - image/png
+        multiple:
+          type: boolean
+          description: |
+            是否允許選多個檔案。
+          example: false
+        maxSize:
+          type: integer
+          format: int64
+          description: |
+            單檔大小上限，位元組。
+          example: 10485760
+    FormNumberConfig:
+      type: object
+      description: |
+        `type: number` 欄位的限制。與 `validation` 的 `min` / `max` / `step` 意義相同，兩者都有時以本區為準。
+      properties:
+        min:
+          type: number
+          description: |
+            數值下限。
+          example: 0
+        max:
+          type: number
+          description: |
+            數值上限。
+          example: 100000000
+        step:
+          type: number
+          description: |
+            遞增間隔。
+          example: 1000
+    FormField:
+      type: object
+      description: |
+        表單的一個欄位。
+      properties:
+        id:
+          type: string
+          description: |
+            欄位的識別碼。
+          example: Ol5dPKnifWCkroZ0UjvvG
+        type:
+          type: string
+          description: |
+            欄位型別，決定要渲染成什麼輸入元件。
+
+            `select` 的選項在 `options`；`list` 是可重複的一組子欄位，子欄位定義在自己的 `fields`；`file` 的限制在 `fileConfig`；`number` 的範圍在 `numberConfig`。
+          enum:
+            - text
+            - password
+            - number
+            - date
+            - datetime
+            - checkbox
+            - file
+            - boolean
+            - select
+            - list
+          example: number
+        name:
+          type: string
+          description: |
+            欄位名稱。**送回去時 `MessageInput.form` 的 key 就是這個值。**
+          example: 年收入
+        label:
+          type: string
+          description: |
+            顯示在輸入框旁的文字。
+          example: 年收入（新台幣）
+        description:
+          type: string
+          description: |
+            欄位的補充說明。
+          example: 稅前總額，含獎金。
+        placeholder:
+          type: string
+          description: |
+            輸入框裡的提示文字。
+          example: 例如 1200000
+        defaultValue:
+          description: |
+            預設值。型別跟著 `type` 走，所以這裡不限制形狀。
+          example: 0
+        required:
+          type: boolean
+          description: |
+            是否必填。
+          example: true
+        disabled:
+          type: boolean
+          description: |
+            是否唯讀。
+          example: false
+        validation:
+          $ref: '#/components/schemas/FormFieldValidation'
+        options:
+          type: array
+          description: |
+            `type: select` 的可選項目。
+          items:
+            $ref: '#/components/schemas/FormFieldOption'
+        source:
+          type: string
+          description: |
+            `options` 從哪來。`custom` 是 agent 自己列的；其餘三種由平台動態帶入對應的清單。
+          enum:
+            - custom
+            - users
+            - roles
+            - kb
+          example: custom
+        bindings:
+          type: object
+          additionalProperties:
+            type: string
+          description: |
+            用變數運算式動態覆寫本欄位的其他屬性。key 是要覆寫的屬性名，value 是運算式。
+          example:
+            disabled: $vars.readonlyMode
+        fileConfig:
+          $ref: '#/components/schemas/FormFileConfig'
+        numberConfig:
+          $ref: '#/components/schemas/FormNumberConfig'
+        fields:
+          type: array
+          description: |
+            `type: list` 的子欄位定義——list 的每一列都由這組欄位組成。
+          items:
+            $ref: '#/components/schemas/FormField'
+    FormSchema:
+      type: object
+      description: |
+        表單的定義。**這是 agent 送出來的，不是呼叫端自己組的**——照著它渲染畫面，再把使用者填的值用 `MessageInput.form` 送回去。
+      properties:
+        title:
+          type: string
+          description: |
+            表單標題。
+          example: 財務基本資料
+        description:
+          type: string
+          description: |
+            表單的說明文字。
+          example: 請提供以下資訊，以便產生您的三年財務計畫。
+        fields:
+          type: array
+          description: |
+            表單的欄位定義，依序渲染。
+          items:
+            $ref: '#/components/schemas/FormField'
+        enableFeedback:
+          type: boolean
+          description: |
+            是否允許使用者在送出表單時附上一段自由文字。
+          example: true
+    MessageFormData:
+      type: object
+      description: |
+        agent 向使用者要資料時用的表單，以及使用者填了什麼。出現在 `role: user` 的訊息上。
+      properties:
+        schema:
+          $ref: '#/components/schemas/FormSchema'
+        values:
+          type: object
+          additionalProperties: true
+          description: |
+            使用者實際填的值，key 對應 `schema.fields` 各項的 `name`。
+          example:
+            年收入: 1200000
+            每月固定支出: 45000
+    Message:
+      type: object
+      description: |
+        對話裡的一則訊息。使用者與模型的每次發言各是一則。
+      required:
+        - messageId
+        - createdAt
+        - role
+        - text
+      properties:
+        messageId:
+          type: string
+          description: |
+            訊息的識別碼。
+          example: 50b3eae9-3ac7-417d-ac70-171b60d0554f
+        createdAt:
+          type: integer
+          description: |
+            建立時間，Unix 秒數。
+          example: 1719504000
+        role:
+          type: string
+          description: |
+            這則訊息是誰說的。
+
+            | 值 | 意思 |
+            | --- | --- |
+            | `user` | 使用者送出的 |
+            | `assistant` | 模型的回答 |
+            | `system` | 系統提示（`systemPrompt` 帶進來的） |
+            | `tool` | agent 呼叫外部工具的結果 |
+          enum:
+            - system
+            - user
+            - assistant
+            - tool
+          example: assistant
+        text:
+          type: string
+          description: |
+            訊息的文字內容。
+          example: 好的，我幫您擬一份三年財務計畫。
+        thought:
+          type: string
+          description: |
+            模型在產生 `text` 之前的推理過程。**不是給終端使用者看的主要內容**，通常收在可展開的區塊裡。
+          example: 使用者要的是三年期的規劃，我先拆成收入、固定支出、變動支出、儲蓄四塊，再逐年推算。
+        thoughtTitle:
+          type: string
+          description: |
+            `thought` 摺疊起來時顯示的標題。**只有跑 flow 的時候才有值。**
+          example: 最終確認
+        assets:
+          type: array
+          description: |
+            這則訊息夾帶的檔案。
+          items:
+            $ref: '#/components/schemas/ContentAsset'
+        references:
+          type: array
+          description: |
+            這則回應引用到的知識庫來源。**只有 `knowledge` 與 `agentic-rag` 模式會有。**
+          items:
+            $ref: '#/components/schemas/ContentReference'
+        guardian:
+          $ref: '#/components/schemas/GuardianResult'
+        status:
+          type: string
+          description: |
+            內容檢查的結果。**有值代表這則訊息被判定有問題**，具體原因看 `statusMessage`。
+
+            | 值 | 意思 |
+            | --- | --- |
+            | `bias` | 判定含有偏見內容 |
+            | `hallucination` | 判定內容與提供的知識來源不符 |
+
+            沒有這個欄位代表通過檢查。檢查要在請求時帶 `guardianArgs` 才會執行。
+          enum:
+            - bias
+            - hallucination
+          example: bias
+        statusMessage:
+          type: string
+          description: |
+            `status` 的說明文字。
+          example: 這則回應被判定含有偏見內容。
+        humanInLoop:
+          $ref: '#/components/schemas/HumanInLoop'
+        formData:
+          $ref: '#/components/schemas/MessageFormData'
+          description: |
+            表單的定義與使用者填的值。**只有 agent 用表單向使用者要資料時才會有**（對話的 `executionStatus` 會是 `waitingHumanInputType1`）。
+    NodeStatusDetail:
+      type: object
+      description: |
+        `nodeStatus` 事件的 `detail`。**節點進出執行狀態時送出。**
+      properties:
+        nodeId:
+          type: string
+          description: |
+            狀態變動的節點。
+          example: llmAgentflow_0
+        nodeName:
+          type: string
+          description: |
+            節點的顯示名稱。
+          example: 摘要產生
+        stepId:
+          type: string
+          description: |
+            這一次跑到該節點的步驟識別碼，用途同 `InputRequiredDetail.stepId`。
+
+            **`INPROGRESS` 是在建立步驟之前送的，所以那一筆不會有這個欄位。**
+          example: zR3pW8kNmY6tLxQvD2sHb
+        status:
+          type: string
+          enum:
+            - INPROGRESS
+            - FINISHED
+            - PAUSE
+            - ERROR
+          description: |
+            目前的節點狀態。`PAUSE` 代表停下來等人回覆，會伴隨一個 `inputRequired`。
+          example: INPROGRESS
+    FormInputSchema:
+      type: object
+      description: |
+        FormInput 節點的互動內容。**形狀由該節點的表單設定決定**，頂層是 `title`／`description`／`fields`，`fields` 每一項描述一個欄位（型別、標籤、驗證規則、選項…）。這裡不展開逐欄位的定義。
+      additionalProperties: true
+    HumanInputSchema:
+      type: object
+      description: |
+        HumanInput 節點的互動內容——一段說明文字加上幾個送出按鈕。
+      additionalProperties: true
+      properties:
+        description:
+          type: string
+          description: |
+            給回覆者看的說明。
+          example: 請確認這份報告是否可以對外發布。
+        submitButtons:
+          type: array
+          description: |
+            可以按的按鈕。**按下去送出的是 `value`，不是 `label`**——`InputResponseDetail.action` 拿到的就是 `value`。
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+                description: |
+                  按鈕的識別碼。
+                example: Ol5dPKnifWCkroZ0UjvvG
+              label:
+                type: string
+                description: |
+                  按鈕上的文字。
+                example: 核准
+              value:
+                type: string
+                description: |
+                  按下去實際送出的值。
+                example: approve
+        enableFeedback:
+          type: boolean
+          description: |
+            是否讓回覆者另外填一段文字意見。
+          example: true
+        references:
+          type: array
+          description: |
+            給回覆者參考的上游節點輸出，唯讀。
+          items:
+            type: object
+            additionalProperties: true
+    HumanCorrectionField:
+      type: object
+      description: |
+        HumanCorrection 表單裡的一個可編輯欄位。
+      properties:
+        groupId:
+          type: string
+          description: |
+            欄位所屬的群組，用來把同一來源的欄位排在一起。
+          example: Ol5dPKnifWCkroZ0UjvvG
+        field:
+          type: string
+          description: |
+            欄位路徑，前段是來源節點、後段是該節點輸出裡的位置。
+          example: llmAgentflow_0.output.summary
+        sourceNodeId:
+          type: string
+          description: |
+            值是從哪個節點來的。
+          example: llmAgentflow_0
+        sourceNodeName:
+          type: string
+          description: |
+            來源節點的顯示名稱。
+          example: 摘要產生
+        currentValue:
+          description: |
+            預先填好的現值，**任何 JSON 型別都可能**。
+          example: 第三季營收較去年同期成長 12%。
+        sourceEmpty:
+          type: boolean
+          description: |
+            來源沒有產出值，所以沒得預填。
+          example: false
+        leafSchema:
+          type: object
+          additionalProperties: true
+          description: |
+            這個欄位型別的 JSON Schema，**拿來驅動前端的驗證**。
+        description:
+          type: string
+          description: |
+            欄位說明。
+          example: 對外發布用的一段摘要。
+    HumanCorrectionReference:
+      type: object
+      description: |
+        HumanCorrection 表單旁邊顯示的唯讀參考值。
+      properties:
+        nodeId:
+          type: string
+          description: |
+            參考值來自哪個節點。
+          example: httpAgentflow_0
+        nodeName:
+          type: string
+          description: |
+            節點的顯示名稱。
+          example: 取得原始報表
+        value:
+          description: |
+            參考值，**任何 JSON 型別都可能**。
+          example:
+            第三季營收: 1250000
+    HumanCorrectionSchema:
+      type: object
+      description: |
+        HumanCorrection 節點的互動內容。**這是取代已停用的 LLM／Agent 覆核（`ReviewSchema`）的節點**——把選定的上游欄位預先填好，讓覆核者直接改。
+      properties:
+        prompt:
+          type: string
+          description: |
+            給覆核者看的說明，已經把變數代換完。
+          example: 請確認以下數字與原始報表一致。
+        enableFeedback:
+          type: boolean
+          description: |
+            是否讓覆核者另外填一段文字意見。
+          example: true
+        corrections:
+          type: array
+          description: |
+            可以編輯的欄位，值預先由上游節點的輸出填好。
+          items:
+            $ref: '#/components/schemas/HumanCorrectionField'
+        references:
+          type: array
+          description: |
+            給覆核者參考用的唯讀值。
+          items:
+            $ref: '#/components/schemas/HumanCorrectionReference'
+    Message-2:
+      type: object
+      description: |
+        通用的對話訊息形狀，對應 fedflow 的 `nodes.Message`。設計時設定的訊息只會有 `id` / `role` / `content`，其餘是執行期才有。
+      properties:
+        id:
+          type: string
+          description: |
+            穩定的識別碼，前端拿來當列表的 key。
+          example: V1StGXR8_Z5jdHi6B-myT
+        role:
+          type: string
+          enum:
+            - system
+            - user
+            - assistant
+            - tool
+          description: |
+            發話者。
+          example: user
+        content:
+          type: string
+          description: |
+            訊息內容。
+          example: 幫我把這三份報告的重點整理成一段話。
+        name:
+          type: string
+          description: |
+            具名的函式或工具作者，**執行期才有**。
+          example: googleDriveDownloadFile
+        toolCalls:
+          type: array
+          description: |
+            assistant 訊息產生的工具呼叫，**執行期才有**。
+          items:
+            type: object
+            additionalProperties: true
+        toolCallId:
+          type: string
+          description: |
+            把工具的結果訊息連回原本那次呼叫，**執行期才有**。
+          example: call_9Kq2XmLpVdRt7sNhWyEbZ
+    ReviewTool:
+      type: object
+      description: |
+        Agent 已選用工具的精簡投影。
+      properties:
+        id:
+          type: string
+          description: |
+            這次選用的工具實例識別碼。
+          example: Ol5dPKnifWCkroZ0UjvvG
+        name:
+          type: string
+          description: |
+            使用者自己取的顯示名稱。
+          example: 下載雲端硬碟檔案
+        tool:
+          type: string
+          description: |
+            工具的型別代號。
+          example: googleDriveDownloadFile
+    ReviewSchema:
+      type: object
+      description: |
+        ⚠️ **已停用，只會出現在歷史訊息裡。**
+
+        這是舊的 LLM／Agent 覆核（`ai_response_review`）的內容。該路徑已於 fedflow FEDGPT-14609 / FEDGPT-14611 移除，**現在不會再產生**；取而代之的是 `HumanCorrectionSchema`。
+
+        保留這份定義是因為 `sseEvents` 會把歷史事件原樣回放（存在資料庫的 `sse_events` 欄位），移除之前的訊息可能還帶著它。**新接的整合不需要處理這個形狀。**
+      properties:
+        type:
+          type: string
+          enum:
+            - ai_response_review
+          description: |
+            固定值。
+          example: ai_response_review
+        title:
+          type: string
+          description: |
+            節點的顯示名稱。
+          example: 回覆覆核
+        prompt:
+          type: string
+          description: |
+            已經把變數代換完的 LLM／Agent 提示詞。
+          example: 請根據以下資料撰寫一段摘要。
+        generatedResponse:
+          type: string
+          description: |
+            AI 覆核前的原始輸出，**即使覆核者改過也會保留**。
+          example: 第三季營收較去年同期成長 12%。
+        referenceNodeIds:
+          type: array
+          description: |
+            設計時指定要參考的上游節點。
+          items:
+            type: string
+          example:
+            - llmAgentflow_0
+        referenceStepIds:
+          type: array
+          description: |
+            上面那些節點在**這一次執行**裡實際對應的步驟，依序號由小到大排列。迴圈或重跑會讓同一個節點對到多個步驟。
+
+            拿去打 `GET /fedflow/v1/tasks/{executionId}/steps/{stepId}`。
+          items:
+            type: string
+          example:
+            - zR3pW8kNmY6tLxQvD2sHb
+        provider:
+          type: string
+          description: |
+            模型供應商。
+          example: fedgpt
+        model:
+          type: string
+          description: |
+            模型名稱。
+          example: fedgpt-moe-1.10.14
+        modelConfig:
+          type: object
+          additionalProperties: true
+          description: |
+            供應商各自的模型設定（`temperature`、`maxTokens`、`topP`、`streaming` 之類）。**形狀依供應商而定，這裡不限制。**
+        messages:
+          type: array
+          description: |
+            設定好的對話訊息，**只有 LLM 節點有**。`content` 已經把變數代換完。
+
+            設計時只會有 `id` / `role` / `content`，其餘欄位是執行期才會出現的。
+          items:
+            $ref: '#/components/schemas/Message-2'
+        systemMessage:
+          type: string
+          description: |
+            已代換變數的 system 訊息，**只有 Agent 節點有**。
+          example: 你是一位嚴謹的財報分析助理。
+        tools:
+          type: array
+          description: |
+            Agent 當時可用的工具，**只有 Agent 節點有**。
+          items:
+            $ref: '#/components/schemas/ReviewTool'
+    InputRequiredDetail:
+      type: object
+      description: |
+        `inputRequired` 事件的 `detail`。**互動節點停下來等人回覆時送出一次。**
+
+        用 `waitingType` 決定要畫哪一種表單，`schema` 是那種表單的內容。
+      properties:
+        executionId:
+          type: string
+          description: |
+            這次執行的識別碼。
+
+            ⚠️ **子流程的情況下這裡是最外層執行的 ID**，不是子執行的——子執行的 ID 在 `childExecutionId`。
+          example: 8K65Qr3rRxyv116m2CP0Z
+        nodeId:
+          type: string
+          description: |
+            停下來的那個節點。
+          example: humanCorrectionAgentflow_0
+        nodeName:
+          type: string
+          description: |
+            節點的顯示名稱。
+          example: 主管覆核
+        nodeType:
+          type: string
+          description: |
+            節點型別。
+          example: HumanCorrection
+        stepId:
+          type: string
+          description: |
+            這一次執行到該節點所產生的步驟識別碼。同一個 `nodeId` 在一次執行裡可能跑很多次（迴圈、重跑），靠這個值分辨是哪一次。
+
+            拿它去打 `GET /fedflow/v1/tasks/{executionId}/steps/{stepId}` 可以看該步驟的細節。**節點還沒開始跑的時候不會有這個欄位。**
+          example: zR3pW8kNmY6tLxQvD2sHb
+        waitingType:
+          type: string
+          enum:
+            - tool_approval
+            - human_input
+            - form_input
+            - human_correction
+          description: |
+            在等哪一種回覆，**決定 `schema` 的形狀**：
+
+            | `waitingType` | `schema` | 要畫什麼 |
+            | --- | --- | --- |
+            | `form_input` | `FormInputSchema` | FormInput／Start 的表單 |
+            | `human_input` | `HumanInputSchema` | 說明文字加幾個送出按鈕 |
+            | `human_correction` | `HumanCorrectionSchema` | 預先填好的校正表單 |
+            | `tool_approval` | 工具核准的內容 | 要不要讓 Agent 執行這個工具 |
+
+            ⚠️ **`ai_response_review` 已經不再產生**——那條 LLM／Agent 覆核路徑被移除了，取而代之的是 `human_correction`。只有移除前留下的歷史訊息才可能在 `sseEvents` 裡看到它。
+
+            執行狀態那邊的 `waitingType` 還有 `cc_opinion` 與 `async_tool` 兩個值，**但那兩種不會送出 `inputRequired`**。
+          example: human_correction
+        schema:
+          description: |
+            互動的內容，**形狀看 `waitingType`**（對照表見上）。
+
+            用 `anyOf` 而不是 `oneOf`：`FormInputSchema` 與 `HumanInputSchema` 都是自由形狀的物件，同一份 payload 可以同時符合，「剛好符合一個」不成立（同 `task.yaml` 的 `InteractionItem.schema`）。
+          anyOf:
+            - $ref: '#/components/schemas/FormInputSchema'
+            - $ref: '#/components/schemas/HumanInputSchema'
+            - $ref: '#/components/schemas/HumanCorrectionSchema'
+            - $ref: '#/components/schemas/ReviewSchema'
+        childExecutionId:
+          type: string
+          description: |
+            **只有子流程冒泡到最外層的那一份才有。** 真正停下來的是這個子執行；外層的 `executionId` 則指向最上層。
+          example: Jd4vT9nQ2LmXbRs7Ky1Pw
+        rootNodeId:
+          type: string
+          description: |
+            **只有子流程冒泡的那一份才有。** 最外層流程裡「呼叫這個子流程」的那個節點。
+          example: iterationAgentflow_0
+        parentStepId:
+          type: string
+          description: |
+            **只有子流程冒泡的那一份才有。** 觸發這個子執行的上層步驟。
+          example: Fq7yB1nCvM4dKsZ9rT6Xa
+    InputReceivedDetail:
+      type: object
+      description: |
+        `inputReceived` 事件的 `detail`。**回覆進度變動時送出**——進入等待時先送一次當作初始快照，之後每有一個人送出回覆就再送一次。
+
+        ⚠️ **名字容易誤會：這不是「某個人回覆了」的事件**，那是 `inputResponse`。這裡給的是整體進度（`respondents` 累計、`pending` 還沒回、`total` 應到人數）。
+      properties:
+        executionId:
+          type: string
+          description: |
+            這次執行的識別碼。
+          example: 8K65Qr3rRxyv116m2CP0Z
+        nodeId:
+          type: string
+          description: |
+            在等回覆的節點。
+          example: humanInputAgentflow_0
+        nodeName:
+          type: string
+          description: |
+            節點的顯示名稱。
+          example: 主管簽核
+        stepId:
+          type: string
+          description: |
+            這一次跑到該節點的步驟識別碼，用途同 `InputRequiredDetail.stepId`。
+          example: zR3pW8kNmY6tLxQvD2sHb
+        actorId:
+          type: string
+          description: |
+            觸發這次進度更新的回覆者。**初始快照時是空字串**（那時候還沒有人回覆）。
+          example: dfd9f610-bd64-4487-af4a-9578550c09b0
+        respondents:
+          type: array
+          description: |
+            已經回覆的人，**累計**。
+          items:
+            type: object
+            properties:
+              userId:
+                type: string
+                description: |
+                  回覆者。
+                example: dfd9f610-bd64-4487-af4a-9578550c09b0
+              userName:
+                type: string
+                description: |
+                  回覆者的顯示名稱。
+                example: 王小明
+              action:
+                type: string
+                description: |
+                  做了什麼動作。實際有哪些值看節點型別——HumanInput 是節點自己設定的送出按鈕，HumanCorrection 是 `submit` 或 `reject`。
+                example: submit
+        pending:
+          type: array
+          description: |
+            還沒回覆的人。
+          items:
+            type: object
+            properties:
+              userId:
+                type: string
+                description: |
+                  尚未回覆的人。
+                example: 7c2a91e4-3f58-4b6d-9e01-2ad4c8b7f350
+              userName:
+                type: string
+                description: |
+                  顯示名稱。
+                example: 李美華
+        total:
+          type: integer
+          description: |
+            應該回覆的總人數，**整個等待期間不會變**。
+          example: 2
+    InputResponseDetail:
+      type: object
+      description: |
+        `inputResponse` 事件的 `detail`。**有人送出回覆時送出**（FormInput、HumanInput、HumanCorrection、Agent 的工具核准）。
+
+        ⚠️ **目前只有 flow 執行者本人的回覆會送出這個事件**，其他人的回覆會被過濾掉（`fedflow executor_publish_event.go:130-133`，程式碼標了 TODO 要在前端支援後拿掉）。所以現在 `isExecutor` 一定是 `true`。
+      properties:
+        executionId:
+          type: string
+          description: |
+            這次執行的識別碼。
+          example: 8K65Qr3rRxyv116m2CP0Z
+        nodeId:
+          type: string
+          description: |
+            收到回覆的節點。
+          example: humanCorrectionAgentflow_0
+        nodeName:
+          type: string
+          description: |
+            節點的顯示名稱。
+          example: 主管覆核
+        stepId:
+          type: string
+          description: |
+            這一次跑到該節點的步驟識別碼，用途同 `InputRequiredDetail.stepId`。
+          example: zR3pW8kNmY6tLxQvD2sHb
+        actorId:
+          type: string
+          description: |
+            實際回覆的人。
+          example: dfd9f610-bd64-4487-af4a-9578550c09b0
+        isExecutor:
+          type: boolean
+          description: |
+            回覆的人是不是 flow 的執行者。**受上面的過濾影響，目前恆為 `true`。**
+          example: true
+        action:
+          type: string
+          description: |
+            做了什麼動作。實際有哪些值看節點型別——HumanInput 是節點自己設定的送出按鈕，HumanCorrection 是 `submit` 或 `reject`，工具核准是 `approve` 或 `reject`。
+          example: submit
+        content:
+          type: string
+          description: |
+            回覆的內容，**形狀依節點型別而不同**：
+
+            | 節點 | `content` |
+            | --- | --- |
+            | FormInput | 表單資料的 JSON 字串（選擇不填而略過時不會送出這個事件） |
+            | HumanInput | 動作字串本身 |
+            | HumanCorrection | 覆核者填的意見文字 |
+            | Agent 工具核准 | `approve` 或 `reject` |
+          example: 第三季數字已更正，其餘無誤。
+        accepted:
+          type:
+            - boolean
+            - 'null'
+          description: |
+            給前端顯示用的接受與否：
+
+            | 值 | 意思 |
+            | --- | --- |
+            | `true` | 核准或送出 |
+            | `false` | 退回 |
+            | `null` | 自訂動作，無法歸類 |
+          example: true
+        corrections:
+          type: array
+          description: |
+            **只有 HumanCorrection 節點才有。** 覆核者實際送出的欄位值，用來把已校正的卡片重新畫出來。
+          items:
+            type: object
+            additionalProperties: true
+    ExecutionCreatedDetail:
+      type: object
+      description: |
+        `executionCreated` 事件的 `detail`。**執行紀錄寫進資料庫時送出一次**，讓呼叫端立刻把 `executionId` 與 `taskId` 對起來，不用等執行結束。
+      required:
+        - executionId
+        - taskId
+      properties:
+        executionId:
+          type: string
+          description: |
+            這次執行的識別碼。
+          example: 8K65Qr3rRxyv116m2CP0Z
+        taskId:
+          type: string
+          description: |
+            給人看的工作編號，格式是 `T` 加 9 位補零的序號。
+          example: T000000229
+    TerminateDetail:
+      type: object
+      description: |
+        `terminate` 事件的 `detail`。**使用者手動中止流程時送出**，收到就可以關閉連線。
+      properties:
+        executionId:
+          type: string
+          description: |
+            被中止的執行。
+          example: 8K65Qr3rRxyv116m2CP0Z
+        reason:
+          type: string
+          description: |
+            給人看的中止原因。
+          example: 使用者主動取消
+    SSEChatContent:
+      type: object
+      description: |
+        SSE 事件的內容。**大部分欄位都是選擇性的**，實際有哪些看 `event`。
+      properties:
+        messageId:
+          type: string
+          description: |
+            助理訊息的識別碼。
+          example: V1StGXR8_Z5jdHi6B-myT
+        role:
+          type: string
+          enum:
+            - user
+            - assistant
+            - tool
+            - system
+          description: |
+            發話者，有需要時才帶。
+          example: assistant
+        text:
+          type: string
+          description: |
+            token 文字。**`token` 事件的內容在這裡**，要自己串接起來。
+          example: 已經
+        thought:
+          type: string
+          description: |
+            模型的思考過程。
+          example: 先確認使用者要的是哪一季的資料。
+        thoughtTitle:
+          type: string
+          description: |
+            思考段落的標題。
+          example: 釐清需求
+        assets:
+          type: array
+          description: |
+            這個事件附帶的檔案。
+          items:
+            type: object
+            properties:
+              url:
+                type: string
+                description: |
+                  檔案位置。
+                example: https://example.com/report.pdf
+              type:
+                type: string
+                description: |
+                  檔案種類。
+                example: file
+              filename:
+                type: string
+                description: |
+                  檔名。
+                example: 2024 年度報告.pdf
+        references:
+          type: array
+          description: |
+            引用到的文件片段。
+          items:
+            type: object
+            properties:
+              fileId:
+                type: string
+                description: |
+                  文件的識別碼。
+                example: Ol5dPKnifWCkroZ0UjvvG
+              fileName:
+                type: string
+                description: |
+                  文件名稱。
+                example: 2024 年度報告.pdf
+              content:
+                type: string
+                description: |
+                  被引用到的片段內容。
+                example: 第三季營收較去年同期成長 12%。
+        status:
+          type: string
+          description: |
+            處理狀態。
+          example: INPROGRESS
+        statusMessage:
+          type: string
+          description: |
+            給人看的狀態說明。**`error` 事件的錯誤內容在這裡**，不在 `detail`。
+          example: 節點 HTTP 呼叫失敗
+        detail:
+          description: |
+            結構化的細節，**形狀由外層的 `event` 決定**（對照表見 `SSEEvent.event`）。
+
+            `start` / `token` / `end` / `done` / `error` 沒有這個欄位。
+
+            用 `anyOf` 而不是 `oneOf`：這些 detail 幾乎都沒有必填欄位，同一份 payload 可以同時符合好幾個分支，「剛好符合一個」在這裡不成立。**要靠外層的 `event` 判斷，不要靠 schema 比對。**
+          anyOf:
+            - $ref: '#/components/schemas/NodeStatusDetail'
+            - $ref: '#/components/schemas/InputRequiredDetail'
+            - $ref: '#/components/schemas/InputReceivedDetail'
+            - $ref: '#/components/schemas/InputResponseDetail'
+            - $ref: '#/components/schemas/ExecutionCreatedDetail'
+            - $ref: '#/components/schemas/TerminateDetail'
+            - type: object
+        createdAt:
+          type: string
+          format: date-time
+          description: |
+            內容的時間戳記。
+          example: '2024-06-28T00:00:00+08:00'
+    SSEEvent:
+      type: object
+      description: |
+        SSE 事件的外層信封，走 `text/event-stream` 送出。
+      properties:
+        messageId:
+          type: string
+          description: |
+            這個事件屬於哪一則助理訊息。
+          example: V1StGXR8_Z5jdHi6B-myT
+        createdAt:
+          type: integer
+          description: |
+            事件時間，Unix 秒數。
+          example: 1719504000
+        event:
+          type: string
+          enum:
+            - start
+            - token
+            - end
+            - error
+            - nodeStatus
+            - inputRequired
+            - inputReceived
+            - inputResponse
+            - executionCreated
+            - terminate
+            - done
+            - metadata
+            - usageMetadata
+            - agentFlowEvent
+          description: |
+            事件種類。**`content.detail` 的形狀由它決定**：
+
+            | `event` | `content.detail` | 說明 |
+            | --- | --- | --- |
+            | `nodeStatus` | `NodeStatusDetail` | 節點進出執行狀態 |
+            | `inputRequired` | `InputRequiredDetail` | 停下來等人回覆 |
+            | `inputReceived` | `InputReceivedDetail` | 回覆進度更新 |
+            | `inputResponse` | `InputResponseDetail` | 有人送出了回覆 |
+            | `executionCreated` | `ExecutionCreatedDetail` | 執行紀錄建立 |
+            | `terminate` | `TerminateDetail` | 被使用者中止 |
+            | `start` / `token` / `end` / `done` | 沒有 `detail` | token 文字在 `content.text` |
+            | `error` | 沒有 `detail` | 錯誤訊息在 `content.statusMessage` |
+            | `metadata` / `usageMetadata` / `agentFlowEvent` | — | 保留值，目前不會送出 |
+
+            `done` 是收線訊號——收到就可以關閉連線。
+          example: token
+        content:
+          $ref: '#/components/schemas/SSEChatContent'
+    ChatMessageResponse:
+      type: object
+      description: |
+        flow 模式對話的一則訊息。**這是 FedFlow 的原生格式**，與 Chat V2 自己的訊息格式不同。
+      properties:
+        messageId:
+          type: string
+          description: |
+            訊息的識別碼。SSE 事件都會帶同一個值，用來把串流中的事件掛回這則訊息。
+          example: V1StGXR8_Z5jdHi6B-myT
+        role:
+          type: string
+          enum:
+            - user
+            - assistant
+            - tool
+            - system
+          description: |
+            發話者。
+          example: assistant
+        flowId:
+          type: string
+          description: |
+            這則訊息屬於哪一個 flow。
+          example: Ol5dPKnifWCkroZ0UjvvG
+        runId:
+          type: string
+          description: |
+            同一輪對話往返的識別碼。一次提問可能產生多則訊息（助理回覆、工具呼叫結果…），它們共用同一個 `runId`。
+          example: 7bQmXz2LpVdKr9TsNhWyE
+        executionId:
+          type:
+            - string
+            - 'null'
+          description: |
+            這則訊息對應的 flow 執行。**沒有觸發執行的訊息（例如純使用者提問）是 `null`。**
+          example: 8K65Qr3rRxyv116m2CP0Z
+        taskId:
+          type:
+            - string
+            - 'null'
+          description: |
+            給人看的工作編號，格式是 `T` 加 9 位補零的序號。
+
+            **只有 `executionId` 不是 `null`、而且那筆執行查得到時才有。** 查執行是 best-effort，查不到就整個欄位不出現，不會讓列表失敗（`fedflow code/server/http-api/controller/chatmessage/api_list.go:33-41`）。
+          example: T000000229
+        content:
+          type: string
+          description: |
+            訊息內容。
+          example: 已經幫你把三份報告的重點整理好了。
+        sourceDocuments:
+          type:
+            - string
+            - 'null'
+          description: |
+            引用到的來源文件。**是一段 JSON 字串，不是物件**，要自己 parse。
+          example: '[{"fileId":"Ol5dPKnifWCkroZ0UjvvG","fileName":"2024 年度報告.pdf"}]'
+        usedTools:
+          type:
+            - string
+            - 'null'
+          description: |
+            這次用到的工具。**是一段 JSON 字串，不是物件。**
+          example: '[{"tool":"googleDriveDownloadFile","status":"success"}]'
+        events:
+          type:
+            - string
+            - 'null'
+          description: |
+            SSE 事件的歷史紀錄，**舊格式**——一段 JSON 陣列字串。
+
+            **只有在 `sseEvents` 沒有值的時候才會出現**，兩者不會同時給。新接的整合請讀 `sseEvents`。
+          example: '[{"event":"token","content":{"text":"已"}}]'
+        sseEvents:
+          type: array
+          description: |
+            SSE 事件的歷史紀錄，**已經 parse 好的物件陣列**。在執行進入終態（`FINISHED` / `ERROR` / `TERMINATED`）時才寫進資料庫。
+
+            優先讀這個欄位；它沒有值時後端才改回傳舊格式的 `events`。
+          items:
+            $ref: '#/components/schemas/SSEEvent'
+        assets:
+          type:
+            - string
+            - 'null'
+          description: |
+            這則訊息附帶的檔案。**是一段 JSON 字串，不是物件。**
+          example: '[{"url":"https://example.com/a.png","type":"image","filename":"a.png"}]'
+        formData:
+          type: object
+          description: |
+            表單訊息的定義與已填內容。**只有 FormInput 這類表單互動的訊息才有這個欄位。**
+
+            `schema` 是表單定義、`values` 是使用者送出的值，兩個一起才能把已填的表單重新畫出來。
+          properties:
+            schema:
+              type: object
+              additionalProperties: true
+              description: |
+                表單定義。頂層是 `title`／`description`／`fields`，`fields` 每一項描述一個欄位（型別、標籤、驗證規則、選項…）。**逐欄位的形狀由 flow 的表單設定決定，這裡不展開。**
+            values:
+              type: object
+              additionalProperties: true
+              description: |
+                使用者送出的值，key 是欄位的 `name`。
+              example:
+                季度: Q3
+                部門: 業務一部
+        createdAt:
+          type: integer
+          description: |
+            建立時間，Unix 秒數。
+          example: 1719504000
+    ContentAssetInput:
+      type: object
+      description: |
+        訊息要夾帶的檔案（請求方向）。**`url` 與 `key` 二選一**，兩個都不給會被拒。
+
+        - **`key`（建議）** —— 走 Asset V2 分頁的上傳流程拿到的 `assetKey`。用這個的好處是檔名會自動帶入，而且不需要一個對外可存取的 URL。
+        - **`url`** —— 直接給一個 FedGPT 存取得到的 URL。適合檔案本來就放在你自己的伺服器上。
+      required:
+        - type
+      properties:
+        type:
+          type: string
+          description: |
+            檔案的種類。
+          example: image
+        url:
+          type: string
+          description: |
+            檔案的 URL，必須是 FedGPT 連得到的位址。與 `key` 二選一。
+          example: https://example.com/report.pdf
+        key:
+          type: string
+          description: |
+            Asset V2 上傳後拿到的 `assetKey`。與 `url` 二選一。
+
+            必須是還在有效期內、且以 `general` 用途上傳的 asset，否則會回錯誤。
+          example: tmp/Ol5dPKnifWCkroZ0UjvvG
+    MessageInput:
+      type: object
+      description: |
+        要送出的訊息。**`text` 與 `form` 擇一使用**——一般對話用 `text`，回覆 agent 的表單時用 `form`。
+      properties:
+        text:
+          type: string
+          description: |
+            訊息內容，上限 100,000 字元。
+          example: 請幫我擬一份三年財務計畫
+        assets:
+          type: array
+          description: |
+            隨訊息夾帶的檔案。透過 Asset V2 分頁上傳後把 `assetKey` 填進來。
+          items:
+            $ref: '#/components/schemas/ContentAssetInput'
+        form:
+          type: object
+          description: |
+            表單的填答內容，**在 agent 用表單向你要資料時使用**（對話的 `executionStatus` 為 `waitingHumanInputType1`）。
+
+            形狀由該表單的定義決定，欄位對應到 `formData.schema.fields` 裡各項的 `name`。序列化後上限 100,000 字元。
+          additionalProperties: true
+          example:
+            年收入: 1200000
+            每月固定支出: 45000
+    LlmArgs:
+      type: object
+      description: |
+        這一次請求要覆寫的模型參數。**全部選填**，不帶就用模型的預設值。這些值只影響當次請求，不會寫進對話設定。
+      properties:
+        temperature:
+          type: number
+          format: float
+          description: |
+            隨機性。越大回答越有變化，越小越保守、越可重現。
+          example: 0.7
+          minimum: 0
+          maximum: 1.5
+        topK:
+          type: number
+          description: |
+            每一步只從機率最高的前 K 個 token 裡挑。越大用字越多樣。
+          example: 50
+          minimum: 1
+          maximum: 300
+        topP:
+          type: number
+          format: float
+          description: |
+            每一步只從累積機率達 P 的 token 裡挑（nucleus sampling）。越大用字越多樣；設 `1` 等於不限制。
+          example: 1
+          minimum: 0
+          maximum: 1
+        minTokens:
+          type: number
+          description: |
+            輸出的**最少** token 數。用來避免模型草率地只回一兩句就停。
+          example: 1
+          minimum: 1
+          maximum: 256
+        maxTokens:
+          type: number
+          description: |
+            輸出的**最多** token 數。到上限就會被截斷，所以要留足夠空間給預期的回答長度。
+          example: 2048
+          minimum: 1
+          maximum: 2048
+    GuardianArgs:
+      type: object
+      description: |
+        內容檢查的門檻。FedGPT 內建兩道檢查：**偏見（bias）** 與 **幻覺（hallucination）**。
+
+        兩個欄位都選填，**不帶就用系統設定的預設門檻**。分數大於等於門檻就判定命中，對應的訊息會帶上 `status`。
+
+        - **門檻設 `0` 等於關閉該項檢查。**
+        - 兩項都命中時**只會標記 `bias`**——bias 先判，命中就不再判 hallucination，所以 `status` 一次只有一個值。
+        - hallucination 是拿回答跟提供的知識來源比對，所以**只在有知識來源的模式下才有意義**（`knowledge`、`agentic-rag`）。
+      properties:
+        biasThreshold:
+          type: number
+          format: float
+          description: |
+            偏見的判定門檻。分數越高代表偏見程度越高，所以**門檻設越低越嚴格**。
+          example: 0.5
+          minimum: 0
+          maximum: 1
+        hallucinationThreshold:
+          type: number
+          format: float
+          description: |
+            幻覺的判定門檻。分數越高代表越偏離知識來源，**門檻設越低越嚴格**。
+          example: 0.7
+          minimum: 0
+          maximum: 1
+    ChatRequest:
+      type: object
+      description: |
+        送一則訊息到已建立的對話。**`convId` 必填**——對話要先用 `POST /public/chat/v2/conversations` 建好。
+      required:
+        - convId
+        - message
+      properties:
+        convId:
+          type: string
+          description: |
+            要送進哪個對話。用建立對話時回傳的值。
+          example: 3098643a-fd87-4c1b-bc45-c76d8d36a96a
+        message:
+          $ref: '#/components/schemas/MessageInput'
+        systemPrompt:
+          type: string
+          description: |
+            這一次請求要用的系統提示，用來設定模型的角色或語氣。**只影響當次請求**，不會存進對話。
+          example: 你是一位謹慎的財務顧問，回答時一律附上計算過程。
+        llmArgs:
+          $ref: '#/components/schemas/LlmArgs'
+        guardianArgs:
+          $ref: '#/components/schemas/GuardianArgs'
+    ChatResponse:
+      type: object
+      description: |
+        這一輪的回應。**`messages` 是這一輪新增的訊息**，不是整段對話歷史——要完整歷史請打 `GET /public/chat/v2/conversations/{convId}/messages`。
+      required:
+        - convId
+        - messages
+      properties:
+        convId:
+          type: string
+          description: |
+            這則回應所屬的對話 ID。
+          example: 3098643a-fd87-4c1b-bc45-c76d8d36a96a
+        messages:
+          type: array
+          description: |
+            這一輪產生的訊息，依時間排序。串流模式下每個 `event: data` 各帶一份，內容會逐段增長。
+          items:
+            $ref: '#/components/schemas/Message'
+        overwrite:
+          type: boolean
+          description: |
+            **串流模式才有意義。** `true` 代表這一份要**取代**先前收到的同 ID 訊息（模型改寫了已經送出的內容），而不是接在後面。呼叫端要依 `messageId` 覆寫，否則畫面上會出現重複片段。
+          example: false
+    Model:
+      type: object
+      description: |
+        一個可用的模型。**建立對話時要填的是 `id`**（或等值的 `name`），不是 `displayName`。
+      required:
+        - name
+        - type
+      properties:
+        id:
+          type: string
+          description: |
+            模型識別碼，**這個值才是要填進 `conversation.model` 的**。
+
+            格式由後端的模型服務決定，不要自己組：平台內建的模型是「名稱＋版號」（如 `fedgpt-moe-1.10.14`），自行微調的 `lora` 模型則是建立時產生的識別碼。**一律從本端點的回傳原封取用。**
+          example: fedgpt-moe-1.10.14
+        name:
+          type: string
+          description: |
+            與 `id` 完全相同的值。保留這個欄位是為了相容舊的呼叫端，新的整合請用 `id`。
+          example: fedgpt-moe-1.10.14
+        displayName:
+          type: string
+          description: |
+            給人看的名稱，會顯示在對話標頭上。**不要拿它去填 `conversation.model`**——填了會回 `400 data.validation: model <值> is not found`。
+
+            平台內建的模型通常與 `id` 相同；`lora` 模型則是建立時自己取的名稱，兩者可能完全不像。
+          example: fedgpt-moe-1.10.14
+        type:
+          type: string
+          description: |
+            `llm` 是平台內建的模型；`lora` 是在本平台微調出來的自訂模型。
+
+            ⚠️ **`lora` 只能用在 `normal` mode。** 用在其他 mode 會回 `400 data.validation: model <值> is not allowed in mode <mode>`。
+          enum:
+            - llm
+            - lora
+          example: llm
+    Knowledge:
+      type: object
+      description: |
+        一個知識庫。`knowledgeId` 是 `mode: knowledge` 與 `mode: agentic-rag` 的對話要填進 `params` 的值（至少 1 個，可多個）。
+      required:
+        - knowledgeId
+        - name
+        - description
+      properties:
+        knowledgeId:
+          type: string
+          description: |
+            知識庫的識別碼。填進 `params`。**必須有 `chat` 權限**，否則整個建立對話的請求會回 `403 auth.forbidden`。
+          example: Ol5dPKnifWCkroZ0UjvvG
+        name:
+          type: string
+          description: |
+            知識庫名稱。
+          example: 內部規章
+        description:
+          type: string
+          description: |
+            知識庫的用途說明。
+          example: 公司內部規章與作業流程文件
+    FAQ:
+      type: object
+      description: |
+        一組 FAQ。`faqId` 是 `mode: faq` 的對話要填進 `params` 的值（至少 1 個，可多個）。
+      required:
+        - faqId
+        - name
+        - description
+      properties:
+        faqId:
+          type: string
+          description: |
+            FAQ 的識別碼。填進 `params`。**必須有 `chat` 權限**。
+          example: Ol5dPKnifWCkroZ0UjvvG
+        name:
+          type: string
+          description: |
+            FAQ 名稱。
+          example: 客服常見問題
+        description:
+          type: string
+          description: |
+            這組 FAQ 的用途說明。
+          example: 產品保固與退換貨的常見問答
+    Tabular:
+      type: object
+      description: |
+        一個表格資料庫。`tabularId` 是 `mode: tabular` 的對話要填進 `params` 的值——**恰好 1 個，不能多**。
+      required:
+        - tabularId
+        - name
+        - description
+      properties:
+        tabularId:
+          type: string
+          description: |
+            表格資料庫的識別碼。填進 `params`，**只能填一個**。必須有 `chat` 權限。
+          example: Ol5dPKnifWCkroZ0UjvvG
+        name:
+          type: string
+          description: |
+            表格資料庫名稱。
+          example: 2024 年銷售明細
+        description:
+          type: string
+          description: |
+            這份表格的內容說明。
+          example: 各分店逐月銷售金額與品項
+    PluginApiKey:
+      type: object
+      description: |
+        plugin 呼叫外部 API 時使用的一組金鑰。
+      required:
+        - type
+        - value
+      properties:
+        type:
+          type: string
+          description: |
+            金鑰要怎麼帶進請求。
+
+            | 值 | 實際送出的 header |
+            | --- | --- |
+            | `basic` | `Authorization: Basic <value>` |
+            | `bearer` | `Authorization: Bearer <value>` |
+            | `header` | `<key>: <value>`（`key` 欄位決定 header 名稱） |
+
+            只有 `header` 需要填 `key`。
+          enum:
+            - basic
+            - bearer
+            - header
+          example: header
+        key:
+          type: string
+          description: |
+            header 的名稱。**只有 `type: header` 需要填**，其餘兩種會被忽略。
+          example: X-TTS-Key
+        value:
+          type: string
+          description: |
+            金鑰的值。
+          example: 95de8d24-c640-4d46-a780-5b0520f2b348
+    PluginInput:
+      type: object
+      description: |
+        一個 plugin 的定義。plugin 讓模型能呼叫外部 API 來完成它自己做不到的事——模型會讀 `description` 判斷這個 plugin 能不能解決當下的問題，再依 `yaml` 組出實際的請求。
+      required:
+        - name
+        - yaml
+      properties:
+        name:
+          type: string
+          description: |
+            plugin 的顯示名稱，**不可重複**，上限 100 字元。
+          example: text-to-speech
+        description:
+          type: string
+          description: |
+            這個 plugin 能做什麼。**模型是靠這段文字決定要不要用它**，所以要寫得具體——寫得太籠統模型會亂用或不用。
+          example: 把一段文字轉成語音檔，回傳可下載的音訊 URL。
+        yaml:
+          type: string
+          description: |
+            這個 plugin 的 OpenAPI 文件（YAML 格式字串）。模型依它決定要打哪條路徑、帶哪些參數。
+          example: |
+            openapi: 3.1.0
+            info: { title: TTS, version: '1.0' }
+            paths:
+              /speak:
+                post: { summary: 文字轉語音 }
+        apiKeys:
+          type: array
+          description: |
+            呼叫該 API 時要帶的金鑰。
+          items:
+            $ref: '#/components/schemas/PluginApiKey'
+    ChatPluginRequest:
+      type: object
+      description: |
+        在正式發布 plugin 之前先試打一次，確認模型讀得懂它的定義、也組得出正確的請求。**不需要 `convId`**，不會產生對話紀錄。
+      required:
+        - message
+        - plugin
+      properties:
+        message:
+          $ref: '#/components/schemas/MessageInput'
+        plugin:
+          $ref: '#/components/schemas/PluginInput'
+    TaskStatus:
+      type: string
+      description: |
+        非同步工作的狀態。
+
+        | 值 | 意思 |
+        | --- | --- |
+        | `ongoing` | 執行中 |
+        | `unread` | 已完成，使用者還沒看過結果 |
+        | `success` | 已完成且已讀 |
+        | `failed` | 執行失敗 |
+      enum:
+        - ongoing
+        - unread
+        - success
+        - failed
+      example: ongoing
+    Task:
+      type: object
+      description: |
+        一次非同步的對話工作。訊息送出後如果不是立即回完（例如 agent 要跑一連串步驟），會用它追蹤進度。
+      required:
+        - taskId
+        - userId
+        - convId
+        - requestMessageText
+        - requestMessageId
+        - status
+        - createdAt
+        - updatedAt
+      properties:
+        taskId:
+          type: integer
+          description: |
+            工作的識別碼。
+          example: 10482
+        userId:
+          type: string
+          description: |
+            發起這次工作的使用者 ID。
+          example: dfd9f610-bd64-4487-af4a-9578550c09b0
+        convId:
+          type: string
+          description: |
+            這次工作所屬的對話 ID。
+          example: 3098643a-fd87-4c1b-bc45-c76d8d36a96a
+        requestMessageText:
+          type: string
+          description: |
+            觸發這次工作的訊息內容。
+          example: 請幫我擬一份三年財務計畫
+        requestMessageId:
+          type: string
+          description: |
+            觸發這次工作的訊息 ID。
+          example: 50b3eae9-3ac7-417d-ac70-171b60d0554f
+        status:
+          $ref: '#/components/schemas/TaskStatus'
+        createdAt:
+          type: integer
+          description: |
+            建立時間，Unix 秒數。
+          example: 1719504000
+        updatedAt:
+          type: integer
+          description: |
+            最後更新時間，Unix 秒數。
+          example: 1719504000
+    FollowUpPromptsConfig:
+      type: object
+      description: |
+        是否在每則回答之後顯示追問建議。
+      required:
+        - status
+      properties:
+        status:
+          type: boolean
+          description: |
+            `true` 代表開啟追問建議。
+          example: true
+    StarterPrompt:
+      type: object
+      description: |
+        一則開場建議提問。
+      required:
+        - prompt
+      properties:
+        prompt:
+          type: string
+          description: |
+            點下去就會送出的提問內容。
+          example: 幫我分析上一季的營收變化
+    ChatbotConfig:
+      type: object
+      description: |
+        聊天介面的設定。
+      properties:
+        followUpPrompts:
+          $ref: '#/components/schemas/FollowUpPromptsConfig'
+        starterPrompts:
+          type: object
+          description: |
+            對話還沒開始時顯示的建議提問，讓使用者可以直接點選而不用自己想。key 只是排序用的識別碼，沒有語意。
+          additionalProperties:
+            $ref: '#/components/schemas/StarterPrompt'
+    Flow:
+      type: object
+      description: |
+        flow 的對話介面設定，決定聊天畫面上要顯示哪些預設提示。
+      properties:
+        chatbotConfig:
+          $ref: '#/components/schemas/ChatbotConfig'
+    Feedback:
+      type: object
+      description: |
+        使用者對某一則回應給的評價。
+      required:
+        - messageId
+        - content
+        - reaction
+        - createdAt
+      properties:
+        messageId:
+          type: string
+          description: |
+            被評價的那則訊息的 ID。
+          example: 50b3eae9-3ac7-417d-ac70-171b60d0554f
+        content:
+          type: string
+          description: |
+            自由填寫的意見。
+          example: 回答有引用到正確的段落，但數字算錯了。
+        reaction:
+          type: string
+          description: |
+            使用者的反應，例如按讚或倒讚。
+          example: like
+        createdAt:
+          type: integer
+          format: int64
+          description: |
+            建立時間，Unix 秒數。
+          example: 1719504000
+    FeedbackCreate:
+      type: object
+      description: |
+        送出一則評價。
+      required:
+        - content
+        - reaction
+      properties:
+        content:
+          type: string
+          description: |
+            自由填寫的意見。
+          example: 回答有引用到正確的段落，但數字算錯了。
+        reaction:
+          type: string
+          description: |
+            使用者的反應，例如按讚或倒讚。
+          example: like
+    FlowChatMessageResponse:
+      $ref: '#/components/schemas/ChatMessageResponse'
+  parameters:
+    limit:
+      in: query
+      name: limit
+      required: true
+      schema:
+        type: integer
+        example: 20
+      description: |
+        這一頁要取幾筆。**必填。**
+    cursor:
+      in: query
+      name: cursor
+      required: false
+      schema:
+        type: string
+        example: Ol5dPKnifWCkroZ0UjvvG
+      description: |
+        翻頁用的游標。**第一頁不要帶**；之後每一頁都填上一次回應的 `nextCursor`。回應沒有 `nextCursor` 就代表沒有下一頁了。
+    convId:
+      in: path
+      name: convId
+      required: true
+      schema:
+        type: string
+        example: 3098643a-fd87-4c1b-bc45-c76d8d36a96a
+      description: |
+        對話的識別碼，建立對話時回傳的值。
+    order:
+      in: query
+      name: order
+      schema:
+        type: string
+        default: '-created_at'
+        description: |
+          排序方式。`-created_at` 是新的在前（預設），`created_at` 是舊的在前。
+        enum:
+          - '-created_at'
+          - created_at
+        example: '-created_at'
+      description: |
+        排序方式。
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-Api-Key
+    AccessToken:
+      type: apiKey
+      in: header
+      name: X-Access-Token

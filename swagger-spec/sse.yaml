@@ -1,0 +1,129 @@
+openapi: 3.1.0
+info:
+  version: latest
+  title: FedGPT SSE 串流
+  description: |
+    本站台有 9 支端點以 `text/event-stream` 串流回應。
+
+    ⚠️ **它們用的不是同一種格式。** 站上有兩種互不相容的 SSE 方言，寫 client 之前**先確認你要打的端點屬於哪一種**——照 A 寫的 client 去接 B，會一直等一個永遠不會來的事件。
+
+    ## 哪一支用哪一種
+
+    | 端點 | 分頁 | 方言 |
+    | --- | --- | --- |
+    | `POST /public/chat/v2/chat/normal:stream` | Chat V2 | **A** |
+    | `POST /public/chat/v2/chat/knowledge:stream` | Chat V2 | **A** |
+    | `POST /public/chat/v2/chat/agenticRag:stream` | Chat V2 | **A** |
+    | `POST /public/chat/v2/chat/faq:stream` | Chat V2 | **A** |
+    | `POST /public/chat/v2/chat/tabular:stream` | Chat V2 | **A** |
+    | `POST /chat/v2/chat/agent:stream` | Flowise V3 | **A** |
+    | `GET /chat/v2/chat/agent/{convId}/stream` | Flowise V3 | **A** |
+    | `POST /public/llm/v1/fedgpt/v1/chat/completions`（`stream: true`） | LLM V1 | **B** |
+    | `POST /public/llm/v1/visual/v1/chat/completions`（`stream: true`） | LLM V1 | **B** |
+
+    **不串流的**：`POST /public/llm/v1/retriever/v1/embeddings` 就算帶了 `stream: true` 也是一次回完整的 JSON，不會變成串流。其餘所有端點都是一般的 JSON 回應。
+
+    ## 唯一兩種方言都適用的規則
+
+    ⚠️ **串流一旦開始，HTTP status code 就固定是 `200`。**
+
+    錯誤是送在串流「裡面」的，不會反映到 status code 上。**只看 status code 判斷成功與否，會漏掉所有串流中途才發生的錯誤**——模型逾時、後端斷線、內容被擋下來，status code 全都是 200。
+
+    怎麼判斷「真的成功了」兩種方言不一樣，各見下面的說明。這也正是不能把兩者混為一談的原因。
+
+    ---
+
+    ## 方言 A：`event: data` 信封
+
+    **Chat V2 的 5 支 ＋ Flowise V3 的 2 支。** 兩個分頁的串流都由平台自己產生，所以格式相同。
+
+    - 每一則資料是 `event: data`，`data:` 帶一個 JSON 物件，**內容就是該端點文件上標示的 response schema**
+    - 失敗時最後一則是 `event: error`，`data:` 帶的是 `Error` 物件——**與非串流端點回傳的同一個 schema**。收到之後串流即結束
+    - 中間可能夾雜 `: heartbeat` 註解行，用途是撐住連線不被中介的 proxy 掐掉。**直接忽略**
+    - 部分端點會在事件前加一行 `id:`，供斷線後以 `Last-Event-ID` 續傳
+    - 事件之間以一個空行分隔，`data:` 永遠是單行
+
+    **怎麼判斷成功**：收到 `event: error` 就是失敗，`reason` 在那個 `Error` 物件裡。沒收到就是正常結束。
+
+    實際收到的位元組：
+
+    ```
+    event: data
+    data: {"convId":"fb8940e0-6403-492a-abcd-014d757cf590","messages":[{"messageId":"50b3eae9-3ac7-417d-ac70-171b60d0554f","createdAt":1719504000,"role":"assistant","text":"好的，"}],"overwrite":false}
+
+    : heartbeat
+
+    event: data
+    data: {"convId":"fb8940e0-6403-492a-abcd-014d757cf590","messages":[{"messageId":"50b3eae9-3ac7-417d-ac70-171b60d0554f","createdAt":1719504000,"role":"assistant","text":"好的，我幫您擬一份三年財務計畫。"}],"overwrite":true}
+
+    event: error
+    data: {"service":"http-gateway","reason":"http.timeout","message":"timeout waiting for model response"}
+    ```
+
+    ⚠️ 注意上面的 `overwrite` —— Chat V2 的串流是**累積式**的，後一則的 `text` 包含前面所有內容。細節見 Chat V2 分頁。
+
+    ---
+
+    ## 方言 B：OpenAI 格式
+
+    **LLM V1 的兩支 chat completions（帶 `stream: true` 時）。** 這三支端點是直接轉發到上游的 vLLM，格式由它決定，與 OpenAI 的 streaming chat completions 相同。
+
+    - **沒有 `event:` 行**，每一則只有 `data:`
+    - `data:` 帶的是一個 `chat.completion.chunk` 物件，**新產生的文字在 `choices[0].delta.content`**——是**增量**不是累積，要自己串接
+    - 結束訊號是一則字面上的 **`data: [DONE]`**，那不是 JSON，不要拿去 parse
+    - **沒有 `event: error`**，也沒有 `Error` 物件
+    - 未觀察到 heartbeat
+
+    **怎麼判斷成功**：看最後一個 chunk 的 `choices[0].finish_reason`（`stop` 是正常說完、`length` 是撞到 `max_tokens`），以及**有沒有正常收到 `[DONE]`**。串流中途斷掉的話兩者都不會出現。
+
+    實際收到的位元組：
+
+    ```
+    data: {"id":"chatcmpl-c54be07f","object":"chat.completion.chunk","created":1719504000,"model":"fedgpt-moe-1.10.14","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}
+
+    data: {"id":"chatcmpl-c54be07f","object":"chat.completion.chunk","created":1719504000,"model":"fedgpt-moe-1.10.14","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}
+
+    data: {"id":"chatcmpl-c54be07f","object":"chat.completion.chunk","created":1719504000,"model":"fedgpt-moe-1.10.14","choices":[{"index":0,"delta":{"content":"!"},"finish_reason":"stop"}]}
+
+    data: [DONE]
+    ```
+
+    ⚠️ **串流開始之前**的失敗（參數不合法、`model` 不存在）仍然是一般的 JSON 錯誤回應，status code 是 `400` 或 `404`，body 有兩種形狀——見 LLM V1 分頁。
+
+    ## 兩種方言的差異一覽
+
+    | | 方言 A | 方言 B |
+    | --- | --- | --- |
+    | 事件行 | `event: data` / `event: error` | **沒有** |
+    | 資料內容 | 該端點的 response schema | `chat.completion.chunk` |
+    | 文字是累積還是增量 | **累積**（看 `overwrite`） | **增量**（`delta.content`） |
+    | 結束訊號 | 串流自然結束 | **`data: [DONE]`** |
+    | 錯誤 | `event: error` ＋ `Error` 物件 | 沒有；看 `finish_reason` 與有無 `[DONE]` |
+    | heartbeat | `: heartbeat` 註解行 | 未觀察到 |
+servers:
+  - description: API
+    url: /api
+security: []
+tags:
+  - name: sse
+    description: |
+      本頁只有說明，沒有可以呼叫的端點。
+paths:
+  /*:
+    get:
+      summary: （這不是真的端點）
+      description: |
+        **本站台沒有這個端點。**
+
+        swagger-ui 的分頁至少要有一條 path 才渲染得出來，這裡放一條佔位用的 `/*`。本頁的內容全部在上方的說明裡。
+
+        真正會串流的端點在 Chat V2、Flowise V3 與 LLM V1 三個分頁，清單見上方對照表。
+      responses:
+        '200':
+          description: |
+            不會有回應——這不是真的端點。
+          content:
+            text/event-stream:
+              schema:
+                type: string
+components: {}

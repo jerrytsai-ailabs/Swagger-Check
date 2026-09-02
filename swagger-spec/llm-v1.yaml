@@ -1,0 +1,1537 @@
+openapi: 3.1.0
+info:
+  version: latest
+  title: FedGPT LLM V1 API
+  description: |
+    **OpenAI 相容的模型介面。** 三條推論端點各自轉發到一個 vLLM 服務，request 與 response 的形狀與 OpenAI 對應的 API 一致，另外有一支 `GET /models` 列出可以填的模型——所以現成的 OpenAI SDK 換掉 base URL 與金鑰就能直接用，**連模型選單都帶得出來**。
+
+    與 Chat V2 的差別：**這裡沒有對話狀態**。沒有 `convId`、不會保存歷史、沒有知識庫或 FAQ 的檢索——每次請求都是獨立的，對話歷史要自己放在 `messages` 裡帶上。需要那些功能請改用 Chat V2 分頁。
+
+    ## 三條推論端點與各自要填的 `model`
+
+    | 端點 | 用途 | `model` 要填 |
+    | --- | --- | --- |
+    | `POST /public/llm/v1/fedgpt/v1/chat/completions` | 文字對話 | `GET /models` 回傳的任一個 `id`——代稱或帶版號的模型 ID |
+    | `POST /public/llm/v1/visual/v1/chat/completions` | 圖片＋文字對話 | `vlm-v3.11` |
+    | `POST /public/llm/v1/retriever/v1/embeddings` | 文字轉向量 | `embedding-v3.0` |
+
+    **`model` 填錯會被上游的 vLLM 直接拒絕**，所以不要自己組名稱。
+
+    ## 可用的 model 清單去哪查
+
+    打本頁的 `GET /public/llm/v1/fedgpt/v1/models`（與 OpenAI 的 `GET /v1/models` 相容，**OpenAI 相容的 client 會自己打它帶出選單**）。回傳的第一筆是**代稱**——不帶版號、解到本部署當下的預設模型，設定檔填它就好；後面是平台上線中的模型，各自帶版號。
+
+    - **文字 LLM**：填上面那份清單的任一個 `id`。⚠️ **列在清單裡不保證此刻打得通**，真正的錯誤要打 `chat/completions` 才看得到。
+    - **visual 與 embedding**：各自固定對應一個模型（見上表），不需要查，也沒有代稱可以填。
+    - 要看模型的**顯示名稱與說明**打 Chat V2 分頁的 `GET /public/chat/v2/models`。
+
+    ## 認證
+
+    三種寫法都收，**內容都是同一把 personal API key**：
+
+    | header | 說明 |
+    | --- | --- |
+    | `Authorization: Bearer <api-key>` | OpenAI SDK 與相容工具的預設寫法，**填進 `api_key` 欄位就會自己帶上**，不必改 header |
+    | `X-Api-Key` | 本站台其他 API 的寫法，這裡照舊收 |
+    | `X-Access-Token` | 網頁登入用的 access token |
+
+    ⚠️ **`Authorization: Bearer` 只有這一頁的端點收。** 本站台其他 API 帶它一律回 `401`，請用 `X-Api-Key`。
+
+    ## 相容範圍
+
+    大部分 OpenAI 的參數都收，但有幾個要注意：
+
+    - ⚠️ **不認得的欄位會被靜靜忽略，不會報錯。** 參數名拼錯（例如把 `min_tokens` 打成 `min_new_tokens`）只會讓那個參數沒生效，請求照樣回 `200`。**不要拿「沒報錯」當作參數有效的證據。**
+    - `response_format` 只吃 `text` / `json_object` / `json_schema`。要用**正規表示式**或**限定選項**約束輸出，那是 vLLM 專屬的 `structured_outputs`。
+    - 另外收一批 vLLM 專屬的取樣參數（`top_k`、`repetition_penalty`、`min_p`、`min_tokens`、`ignore_eos` 等），OpenAI 沒有這些。
+
+    ## 思考模式（thinking）
+
+    文字端點的模型支援先推理再作答。**預設關閉**，用 `chat_template_kwargs` 打開：
+
+    ```json
+    { "chat_template_kwargs": { "enable_thinking": true } }
+    ```
+
+    | | 位置 |
+    | --- | --- |
+    | 推理過程 | `choices[0].message.reasoning` |
+    | 串流時的推理 | `choices[0].delta.reasoning` |
+    | 最後的答案 | `choices[0].message.content`（**不含推理過程**） |
+
+    三件實測出來、照文件寫的時候會踩到的事：
+
+    - ⚠️ **只有文字端點支援。** visual 端點送過去**會靜靜失效**——回 `200`、`reasoning` 仍是 `null`、沒有任何錯誤訊息。**要看 `reasoning` 有沒有值來判斷，不要看有沒有報錯。**
+    - ⚠️ **token 會明顯變多。** `reasoning` 的 token 算在 `usage.completion_tokens` 裡（實測同一題 279 → 657），而且**沒有 `completion_tokens_details` 可以拆分**。
+    - **串流時推理會先全部送完才開始送 `content`**，兩者不交錯——收到第一則 `content` 就代表推理結束了。
+
+    `enable_thinking: false` 與整個欄位不送，行為完全相同。
+
+    ## 錯誤格式有三種
+
+    這條鏈上是「本站台的 gateway → 平台的 llm-proxy → 上游 vLLM」，**三層都會擋請求，格式不一樣**：
+
+    | 擋下來的是誰 | body | 什麼時候 |
+    | --- | --- | --- |
+    | 本站台的 gateway | `ErrorResponse`——標準的 `Error` 三欄**疊加**一個 OpenAI 形狀的 `error` 物件 | 金鑰不對（`401`）、取不到模型清單、request body 超過 4 MiB |
+    | llm-proxy | 標準的 `Error`（有 `service` / `reason`，**沒有** `error`） | body 不是合法 JSON、沒帶 `model` |
+    | vLLM | `UpstreamError`（OpenAI 格式，**只有** `error` 物件） | 欄位型別錯、缺必填欄位、enum 值不合法、`model` 不存在 |
+
+    **三種都要能處理**——不能假設一定拿得到 `reason`，也不能假設一定拿得到 `error`。狀態碼是 `400`（參數不合法）、`401`（金鑰不對）或 `404`（`model` 不存在或當下不可用）。
+
+    ⚠️ **串流已經開始之後才發生的錯誤不走上表。** 那時表頭早就送出去、狀態碼是 `200`，錯誤會以串流裡的最後一則 `data:` 事件送達——見 `chat/completions` 的 `200` 說明。
+servers:
+  - description: API
+    url: /api
+security:
+  - BearerAuth: []
+  - ApiKeyAuth: []
+  - AccessToken: []
+tags:
+  - name: chat
+    description: OpenAI 相容的 chat completions，分文字與 visual 兩條。
+  - name: embedding
+    description: OpenAI 相容的 embeddings，把文字轉成向量。
+paths:
+  /public/llm/v1/fedgpt/v1/models:
+    get:
+      tags:
+        - chat
+      summary: 列出可用模型（OpenAI 相容）
+      description: |
+        列出可以填進 `chat/completions` 的 `model` 的每一個值。與 OpenAI 的 `GET /v1/models` 相容——**OpenAI 相容的 client（`openai` SDK、Cursor 等）只要填了 base URL 與金鑰就會自己打這支帶出模型選單**，不需要另外設定。
+
+        回傳分兩段：**第一筆是代稱**（不帶版號，解到本部署當下的預設模型；換模型是維運動作，客戶的設定檔不用改），後面接平台上線中的模型，各自帶版號、依平台回傳的順序排列。
+
+        ⚠️ **這不是健康檢查。** 清單反映的是查詢那一刻的上線狀態，**列在裡面不保證此刻打得通**——真正的錯誤要打 `chat/completions` 才看得到（例如模型只有部分 replica 就緒時，代稱會回 `404`，這時直接帶版號的模型 ID 仍然可用）。
+
+        AutoML 微調出來的模型不在這份清單裡。要看模型的顯示名稱與說明請打 Chat V2 分頁的 `GET /public/chat/v2/models`，那支的 `id` 是帶版號的模型 ID，與本支的第二段相同。
+      responses:
+        '200':
+          description: |
+            模型清單。沒有任何模型上線時 `data` 是空陣列。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ModelList'
+        '401':
+          description: |
+            金鑰不對或沒帶。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: |
+            取不到模型清單。**這支不回部分清單**——寧可整支失敗，也不會回一份少了幾個模型、看起來卻成功的清單。
+
+            ⚠️ **狀態碼不保證落在 `5xx`。** 逾時是 `504`、連不上是 `503`、多數其他情況是 `500`，但取清單那一步若拿到一個帶錯誤的回應，狀態碼與 `reason` 就沿用它——**也可能是 `4xx`**。程式請以 `reason` 判斷，不要只看狀態碼的分類。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                service: http-gateway
+                reason: http.unknown
+                message: failed to decode response
+                error:
+                  message: failed to decode response
+                  type: server_error
+                  code: http.unknown
+  /public/llm/v1/fedgpt/v1/chat/completions:
+    post:
+      tags:
+        - chat
+      summary: 文字對話（OpenAI 相容）
+      description: |
+        與 OpenAI 的 chat completions 相容。**每次請求都是獨立的**，沒有對話狀態——要延續脈絡就把先前的往返都放進 `messages`。
+
+        `model` 填 `GET /public/llm/v1/fedgpt/v1/models` 回傳的任一個 `id`，兩種都收：
+
+        - **代稱**（不帶版號，清單的第一筆）——解到本部署當下的預設模型。設定檔填它就好，平台換模型時不用改。
+        - **帶版號的模型 ID**（例如 `fedgpt-moe-1.10.14`）——指定的就是那一個版本，平台換模型也不會變。
+
+        ⚠️ **代稱在模型只有部分 replica 就緒時會回 `404`**，這時直接帶版號的模型 ID 仍然可用。清單以外的字串會被上游拒絕，不要自己組名稱。
+
+        詳細欄位說明見下方的 request schema。與 OpenAI 相比要注意三點：
+
+        - `response_format` 只吃 `text` / `json_object` / `json_schema` 三個值。要用正規表示式或限定選項約束輸出，改用 vLLM 專屬的 `structured_outputs`。
+        - 另收一批 vLLM 專屬取樣參數（`top_k`、`repetition_penalty`、`min_p`、`min_tokens`、`ignore_eos`、`skip_special_tokens` 等）。
+        - **不認得的欄位會被靜靜忽略**，不會報錯——參數名拼錯只會讓它沒生效。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatCompletionRequest'
+      responses:
+        '200':
+          description: |
+            OpenAI 格式的 chat completion。
+
+            **`stream: true` 時改以 `text/event-stream` 逐段回傳**，每則是一個 `ChatCompletionChunk`，最後一則是字面上的 `data: [DONE]`。⚠️ **這裡用的是 OpenAI 的 SSE 格式，沒有 `event:` 行、也沒有 `event: error`**——與 Chat V2 那幾支串流端點不同，詳見 **SSE 串流** 分頁的「方言 B」。
+
+            **開了思考模式的話**（`chat_template_kwargs.enable_thinking`），推理過程在 `message.reasoning`，串流時是 `delta.reasoning`，**會先全部送完才開始送 `content`**。
+
+            **沒有回應總時限**，只有「多久沒動靜」的上限：從送出請求算起，到第一個字、以及之後每兩段之間，任一段**靜默滿 120 秒**就中止。
+
+            ⚠️ **中止長什麼樣子分兩種**，差別在回應開始了沒有：
+
+            - **已經開始送**——狀態碼早就是 `200` 了，所以錯誤只能走串流：最後多一則 `data:` 事件（`error.code` 是 `upstream_idle_timeout`）再結束。**要判斷串流是否正常結束，看收到的是 `data: [DONE]` 還是這則錯誤事件**，不要看狀態碼。
+            - **還沒開始送**——回一般的錯誤回應，`500`、body 是 `ErrorResponse`。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatCompletion'
+            text/event-stream:
+              schema:
+                $ref: '#/components/schemas/ChatCompletionChunk'
+        '400':
+          description: |
+            參數不合法。**有三種可能的 body**——本站台的 gateway 擋下來的是 `ErrorResponse`（request body 超過 4 MiB），平台的 llm-proxy 擋下來的是標準的 `Error`（body 不是合法 JSON、或沒帶 `model`），上游 vLLM 擋下來的是 `UpstreamError`（欄位型別錯、缺必填欄位、enum 值不合法）。
+
+            ⚠️ **上游會把它不認得的欄位靜靜吃掉**——拼錯參數名不會報錯，只是那個參數沒有生效。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UpstreamError'
+        '401':
+          description: |
+            金鑰不對或沒帶。`X-Api-Key`、`X-Access-Token` 與 `Authorization: Bearer` 三種寫法都適用。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: |
+            `model` 不存在。同樣有兩種 body（見 `400`）。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UpstreamError'
+        '500':
+          description: |
+            本站台這一側失敗，body 是 `ErrorResponse`。最常見的是上游靜默超過上限、而且**還沒開始回應**（已經開始回應的話錯誤走串流，見 `200`）；讀不到 request body 也算這一種。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                service: http-gateway
+                reason: http.unknown
+                message: ''
+                error:
+                  message: http.unknown
+                  type: server_error
+                  code: http.unknown
+  /public/llm/v1/visual/v1/chat/completions:
+    post:
+      tags:
+        - chat
+      summary: 圖片對話（OpenAI 相容）
+      description: |
+        與文字端點同一套 request 格式，差別是這條接的是視覺模型，`messages` 裡可以夾帶圖片。
+
+        **`model` 必須填 `vlm-v3.11`** ——這條端點固定對應一個視覺模型，填別的會被上游拒絕。`GET /public/llm/v1/fedgpt/v1/models` 那份清單是文字端點的，這裡不適用，也沒有代稱可以填。
+
+        圖片照 OpenAI 的 content part 格式放進 `messages`：
+
+        ```json
+        {
+          "model": "vlm-v3.11",
+          "messages": [
+            {
+              "role": "user",
+              "content": [
+                { "type": "text", "text": "這張圖裡有幾個人？" },
+                { "type": "image_url", "image_url": { "url": "https://example.com/photo.jpg" } }
+              ]
+            }
+          ]
+        }
+        ```
+
+        其餘參數與限制和文字端點相同——**兩條端點共用同一份 request schema**。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatCompletionRequest'
+      responses:
+        '200':
+          description: |
+            OpenAI 格式的 chat completion。
+
+            **`stream: true` 時改以 `text/event-stream` 逐段回傳**，格式與文字端點相同——見 **SSE 串流** 分頁的「方言 B」。
+
+            ⚠️ **這條端點不支援思考模式。** 上游沒有開 reasoning parser，送 `chat_template_kwargs.enable_thinking` 過來**會靜靜失效**——照樣回 `200`、`message.reasoning` 仍是 `null`、不會有任何錯誤訊息。需要思考模式請改用文字端點。
+
+            **沒有回應總時限**，只有「多久沒動靜」的上限：從送出請求算起，到第一個字、以及之後每兩段之間，任一段靜默滿 120 秒就中止。已經開始送的話狀態碼早就是 `200`，錯誤只能走串流——最後多一則 `data:` 事件（`error.code` 是 `upstream_idle_timeout`）再結束；還沒開始送的話回 `500`、body 是 `ErrorResponse`。詳見文字端點的說明。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatCompletion'
+            text/event-stream:
+              schema:
+                $ref: '#/components/schemas/ChatCompletionChunk'
+        '400':
+          description: |
+            參數不合法。**有兩種可能的 body**——平台的 llm-proxy 擋下來的是本站台標準的 `Error`（body 不是合法 JSON、或沒帶 `model`），上游 vLLM 擋下來的是 `UpstreamError`（欄位型別錯、缺必填欄位、enum 值不合法）。
+
+            ⚠️ **上游會把它不認得的欄位靜靜吃掉**——拼錯參數名不會報錯，只是那個參數沒有生效。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UpstreamError'
+        '401':
+          description: |
+            金鑰不對或沒帶。`X-Api-Key`、`X-Access-Token` 與 `Authorization: Bearer` 三種寫法都適用。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: |
+            `model` 不存在。同樣有兩種 body（見 `400`）。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UpstreamError'
+        '500':
+          description: |
+            本站台這一側失敗，body 是 `ErrorResponse`。最常見的是上游靜默超過上限、而且**還沒開始回應**（已經開始回應的話錯誤走串流，見 `200`）；讀不到 request body 也算這一種。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                service: http-gateway
+                reason: http.unknown
+                message: ''
+                error:
+                  message: http.unknown
+                  type: server_error
+                  code: http.unknown
+  /public/llm/v1/retriever/v1/embeddings:
+    post:
+      tags:
+        - embedding
+      summary: 文字轉向量（OpenAI 相容）
+      description: |
+        把文字轉成向量，與 OpenAI 的 embeddings API 相容。常用來做語意檢索：先把文件轉成向量存進向量資料庫，查詢時把問題也轉成向量再比相似度。
+
+        **`model` 必須填 `embedding-v3.0`** ——這條端點固定對應一個 embedding 模型，填別的會被上游拒絕。`GET /public/llm/v1/fedgpt/v1/models` 那份清單是文字端點的，這裡不適用，也沒有代稱可以填。
+
+        `input` 一次可以給多筆，**上限 2048 筆**，回傳的 `data` 會按 `index` 對應回輸入的順序。單筆文字的長度受模型的 context 上限限制，超過會被拒。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateEmbeddingRequest'
+      responses:
+        '200':
+          description: |
+            向量結果，順序與 `input` 一致。
+
+            **這支不串流**——就算帶了 `stream: true` 也是一次回完整的 JSON。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateEmbeddingResponse'
+        '400':
+          description: |
+            參數不合法。**有兩種可能的 body**——平台的 llm-proxy 擋下來的是本站台標準的 `Error`（body 不是合法 JSON、或沒帶 `model`），上游 vLLM 擋下來的是 `UpstreamError`（欄位型別錯、缺必填欄位、enum 值不合法）。
+
+            ⚠️ **上游會把它不認得的欄位靜靜吃掉**——拼錯參數名不會報錯，只是那個參數沒有生效。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UpstreamError'
+        '401':
+          description: |
+            金鑰不對或沒帶。`X-Api-Key`、`X-Access-Token` 與 `Authorization: Bearer` 三種寫法都適用。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: |
+            `model` 不存在。同樣有兩種 body（見 `400`）。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UpstreamError'
+components:
+  schemas:
+    Model:
+      type: object
+      title: Model
+      description: |
+        清單裡的一個模型。**只有 `id` 要讀**——它就是 `chat/completions` 的 `model` 要填的字串，其餘三欄是 OpenAI 格式的固定形狀。
+      properties:
+        id:
+          type: string
+          description: |
+            填進 `model` 的字串。**不帶版號的是代稱**，解到本部署當下的預設模型；**帶版號的是模型 ID**，永遠指向那一個版本。
+          example: fedgpt-default
+        object:
+          type: string
+          description: |
+            固定值。
+          enum:
+            - model
+          example: model
+        created:
+          type: integer
+          description: |
+            模型的建立時間，Unix 秒數。**代稱那一筆固定是 `0`**——代稱本身沒有建立時間。
+          example: 1719504000
+        owned_by:
+          type: string
+          description: |
+            這筆模型歸誰，固定是 `fedgpt`。
+          example: fedgpt
+    ModelList:
+      type: object
+      title: ModelList
+      description: |
+        模型清單，**OpenAI 的 list 格式**——`openai` SDK 的 `models.list()` 直接吃得下。
+      properties:
+        object:
+          type: string
+          description: |
+            固定值。
+          enum:
+            - list
+          example: list
+        data:
+          type: array
+          description: |
+            可以填進 `chat/completions` 的 `model` 的每一個值。**第一筆是代稱**，後面是平台上線中的模型，各帶版號。
+
+            沒有任何模型上線時是空陣列（`[]`），不是 `null`。
+          items:
+            $ref: '#/components/schemas/Model'
+      example:
+        object: list
+        data:
+          - id: fedgpt-default
+            object: model
+            created: 0
+            owned_by: fedgpt
+          - id: fedgpt-moe-1.10.14
+            object: model
+            created: 1719504000
+            owned_by: fedgpt
+    Error:
+      type: object
+      description: |
+        所有錯誤回應的共通格式。`reason` 的完整清單與觸發情境見 Common 分頁。
+      required:
+        - service
+        - reason
+        - message
+      properties:
+        service:
+          type: string
+          description: |
+            產生這個錯誤的後端元件名。回報問題時附上它，可以直接定位到是哪個服務出錯——也是判斷 `reason` 屬於哪一組命名空間的依據。
+          example: http-gateway
+        reason:
+          type: string
+          description: |
+            錯誤代碼。**程式請用這個欄位做分支**，不要去解析 `message`。
+          example: data.validation
+        message:
+          type: string
+          description: |
+            人類可讀的錯誤說明。**措辭與內容不保證穩定**，可能隨版本改變，不要拿來做程式判斷。
+          example: invalid request body
+        field:
+          type: string
+          description: |
+            造成錯誤的欄位名，主要由 `data.validation` 帶上。**不是每個錯誤都有**——沒有的時候這個欄位整個不會出現在回應裡。
+          example: convId
+    ErrorResponse:
+      title: ErrorResponse
+      description: |
+        本站台自己擋下來的錯誤。形狀是標準的 `Error` **疊加**一個 OpenAI 形狀的 `error` 物件——原本的 `service` / `reason` / `message` 都還在，所以既有的錯誤處理不用改；OpenAI SDK 則讀得到它預期的 `error.message`。
+
+        這條鏈上三種錯誤形狀，看是誰擋下來的：
+
+        | 擋下來的是誰 | body | 什麼時候 |
+        | --- | --- | --- |
+        | 本站台的 gateway | **本 schema**（三欄 ＋ `error`） | 金鑰不對、取不到模型清單、request body 過大 |
+        | 平台的 llm-proxy | 標準的 `Error`（**沒有** `error`） | body 不是合法 JSON、沒帶 `model` |
+        | 上游 vLLM | `UpstreamError`（**只有** `error`） | 欄位型別錯、缺必填欄位、enum 值不合法、`model` 不存在 |
+
+        **三種都要能處理**——不能假設一定拿得到 `reason`，也不能假設一定拿得到 `error`。
+      allOf:
+        - $ref: '#/components/schemas/Error'
+        - type: object
+          required:
+            - error
+          properties:
+            error:
+              type: object
+              title: OpenAIError
+              description: |
+                OpenAI 形狀的錯誤物件。三個欄位都是從左邊那三欄推出來的，**沒有多出任何資訊**——已經在讀 `reason` 的呼叫端不需要改看這裡。
+              required:
+                - message
+                - type
+                - code
+              properties:
+                message:
+                  type: string
+                  description: |
+                    人類可讀的錯誤說明，與外層的 `message` 相同。外層是空字串時**以 `reason` 代入**，因為 OpenAI SDK 顯示的就是這個欄位。
+                  example: auth.no-auth
+                type:
+                  type: string
+                  description: |
+                    OpenAI 的錯誤類別，由 HTTP 狀態碼對應而來。
+
+                    | 狀態碼 | `type` |
+                    | --- | --- |
+                    | `401` | `authentication_error` |
+                    | `403` | `permission_error` |
+                    | `404` | `not_found_error` |
+                    | `429` | `rate_limit_error` |
+                    | 其他 `4xx` | `invalid_request_error` |
+                    | `5xx` | `server_error` |
+                  enum:
+                    - authentication_error
+                    - permission_error
+                    - not_found_error
+                    - rate_limit_error
+                    - invalid_request_error
+                    - server_error
+                  example: authentication_error
+                code:
+                  type: string
+                  description: |
+                    **等於外層的 `reason`。** 程式要分支請用它或 `reason`，兩者永遠相同。
+                  example: auth.no-auth
+      example:
+        service: http-gateway
+        reason: auth.no-auth
+        message: ''
+        error:
+          message: auth.no-auth
+          type: authentication_error
+          code: auth.no-auth
+    Function:
+      type: object
+      properties:
+        name:
+          type: string
+          maxLength: 64
+          pattern: ^[a-zA-Z0-9_-]+$
+          title: Name
+          description: |
+            函式名稱，模型在回應裡就是用它指名要呼叫哪一個。**只能用 a-z、A-Z、0-9、底線與連字號，最長 64 字元。**
+          example: get_weather
+        description:
+          type: string
+          title: Description
+          description: |
+            這個函式在做什麼、什麼情況該用它。**模型是靠這段文字決定要不要呼叫**——寫得越具體越不容易誤用或漏用。
+          example: 取得指定城市目前的天氣。使用者問到天氣、氣溫、會不會下雨時使用。
+        parameters:
+          type: object
+          additionalProperties: true
+          title: Parameters
+          description: |
+            函式接受的參數，用 JSON Schema 描述。模型會照它產生 `arguments`。不需要參數的函式可以省略。
+          example:
+            type: object
+            properties:
+              city:
+                type: string
+                description: 城市名稱，例如「台北」
+            required:
+              - city
+        strict:
+          anyOf:
+            - type: boolean
+              default: false
+            - type: 'null'
+          title: Strict
+          description: |
+            是否嚴格遵守 `parameters` 的 schema。開啟後模型不得產生 schema 以外的參數。
+          example: false
+      required:
+        - name
+      title: Function
+      description: |
+        一個可供模型呼叫的函式宣告。
+
+        **這裡只是「告訴模型有這個函式可用」，不是實際執行。** 模型會在回應的 `tool_calls` 裡指出要呼叫哪個函式、帶什麼參數；真正去執行、再把結果當成一則 `role: tool` 的訊息送回來，都是呼叫端的事。
+    Tool:
+      properties:
+        type:
+          type: string
+          title: Type
+          description: |
+            工具的種類，目前只有 `function`。
+          default: function
+          example: function
+        function:
+          $ref: '#/components/schemas/Function'
+      type: object
+      required:
+        - function
+      title: Tool
+      description: |
+        一個可供模型呼叫的工具。目前只有 `function` 一種。
+    ToolChoiceFuncName:
+      properties:
+        name:
+          type: string
+          title: Name
+          description: |
+            要強制呼叫的工具名稱，必須與 `tools` 裡宣告的其中一個相符。
+          example: get_weather
+      type: object
+      required:
+        - name
+      title: ToolChoiceFuncName
+      description: |
+        指定要強制呼叫哪個工具。
+    ToolChoice:
+      properties:
+        function:
+          $ref: '#/components/schemas/ToolChoiceFuncName'
+        type:
+          type: string
+          const: function
+          title: Type
+          description: |
+            固定是 `function`。
+          default: function
+          example: function
+      type: object
+      required:
+        - function
+      title: ToolChoice
+      description: |
+        強制模型呼叫某個特定工具。只想讓模型自己決定的話，`tool_choice` 直接填字串 `auto` / `required` / `none` 就好，不需要這個物件。
+    StreamOptions:
+      properties:
+        include_usage:
+          anyOf:
+            - type: boolean
+            - type: 'null'
+          title: Include Usage
+          description: |
+            是否在串流的最後多送一則帶 token 用量的事件。要統計成本的話開它。
+          default: false
+          example: true
+      type: object
+      title: StreamOptions
+      description: |
+        串流的額外設定。**只有在 `stream: true` 時才要帶。**
+    JsonSchema:
+      properties:
+        name:
+          type: string
+          title: Name
+          description: |
+            這份 schema 的名稱。
+          example: budget_plan
+        description:
+          anyOf:
+            - type: string
+            - type: 'null'
+          title: Description
+          description: |
+            這份 schema 的用途說明，模型會讀它來理解該產生什麼。
+          example: 三年財務計畫的結構化輸出
+        schema:
+          anyOf:
+            - type: object
+            - type: 'null'
+          title: Schema
+          description: |
+            JSON Schema 本身，描述期望的輸出結構。
+          example:
+            type: object
+            properties:
+              year:
+                type: integer
+              amount:
+                type: number
+            required:
+              - year
+              - amount
+        strict:
+          anyOf:
+            - type: boolean
+            - type: 'null'
+          title: Strict
+          description: |
+            是否嚴格遵守 schema。開啟後模型不得產生 schema 以外的欄位。
+          default: false
+          example: true
+      type: object
+      required:
+        - name
+      title: JsonSchema
+      description: |
+        `response_format.type` 為 `json_schema` 時要帶的結構定義。
+    ResponseFormat:
+      properties:
+        type:
+          type: string
+          title: Type
+          description: |
+            要模型輸出成什麼格式。
+
+            | 值 | 意思 | 還要帶什麼 |
+            | --- | --- | --- |
+            | `text` | 純文字（預設行為） | — |
+            | `json_object` | 合法的 JSON，但不限制結構 | — |
+            | `json_schema` | 符合指定 JSON Schema 的物件 | `json_schema` |
+
+            **只有這三個值**，給別的會被上游擋下來回 `400`。要用正規表示式或限定選項約束輸出，看 `structured_outputs`。
+          enum:
+            - text
+            - json_object
+            - json_schema
+          example: json_schema
+        json_schema:
+          anyOf:
+            - $ref: '#/components/schemas/JsonSchema'
+              title: Json Schema
+            - type: 'null'
+          title: Json Schema
+          description: |
+            `type` 為 `json_schema` 時的結構定義。
+      type: object
+      required:
+        - type
+      title: ResponseFormat
+      description: |
+        強制輸出格式。三個值都是 OpenAI 的標準值。
+
+        要用正規表示式、限定選項或 grammar 約束輸出的話**不在這裡**，那是 vLLM 專屬的 `structured_outputs`。
+    ChatTemplateKwargs:
+      type: object
+      title: ChatTemplateKwargs
+      description: |
+        傳給上游 chat template 的參數。**目前只有 `enable_thinking` 有作用。**
+      properties:
+        enable_thinking:
+          type: boolean
+          description: |
+            開啟思考模式。開啟後模型會先產生一段推理過程，**放在 `message.reasoning`**（串流時是 `delta.reasoning`），`content` 仍然只有最後的答案。
+
+            `false` 與**整個欄位不送**的行為完全相同。
+          default: false
+          example: true
+    StructuredOutputs:
+      type: object
+      title: StructuredOutputs
+      description: |
+        用結構化約束綁住模型的輸出，**vLLM 專屬**，OpenAI 沒有。
+
+        ⚠️ **六個約束只能挑一個**，一個都不給會回 `400`（錯誤訊息會把所有可用的 key 列出來）。
+
+        | 約束 | 型別 | 效果 |
+        | --- | --- | --- |
+        | `json` | object | 輸出符合這份 JSON Schema |
+        | `regex` | string | 輸出符合這個正規表示式 |
+        | `choice` | string[] | 輸出**必定**是清單裡的其中一項 |
+        | `grammar` | string | 輸出符合這份 EBNF grammar |
+        | `json_object` | boolean | 輸出是合法 JSON，但不限制結構 |
+        | `structural_tag` | object | 用標籤界定要約束的片段 |
+
+        `json` 與 `json_object` 跟 `response_format` 的同名值重複，**用哪邊都可以**；`regex` / `choice` / `grammar` / `structural_tag` 則只有這裡有。
+      properties:
+        json:
+          anyOf:
+            - type: object
+              additionalProperties: true
+            - type: 'null'
+          title: Json
+          description: |
+            輸出要符合的 JSON Schema。
+          example:
+            type: object
+            properties:
+              color:
+                type: string
+        regex:
+          anyOf:
+            - type: string
+            - type: 'null'
+          title: Regex
+          description: |
+            輸出要符合的正規表示式。**約束的是整個輸出**，不是部分比對。
+          example: '[0-9]{5}'
+        choice:
+          anyOf:
+            - type: array
+              items:
+                type: string
+            - type: 'null'
+          title: Choice
+          description: |
+            輸出必定是這幾個字串的其中一個。做分類最省事——不必再解析模型的自由回答。
+          example:
+            - 正面
+            - 負面
+            - 中立
+        grammar:
+          anyOf:
+            - type: string
+            - type: 'null'
+          title: Grammar
+          description: |
+            輸出要符合的 EBNF grammar。
+        json_object:
+          anyOf:
+            - type: boolean
+            - type: 'null'
+          title: Json Object
+          description: |
+            輸出是合法的 JSON，但不限制結構。等同 `response_format` 的 `json_object`。
+        structural_tag:
+          anyOf:
+            - type: object
+              additionalProperties: true
+            - type: 'null'
+          title: Structural Tag
+          description: |
+            用標籤界定輸出裡要被約束的片段，其餘部分不限制。
+        disable_any_whitespace:
+          type: boolean
+          title: Disable Any Whitespace
+          description: |
+            禁止模型在結構化輸出裡自由插入空白。
+          default: false
+          example: false
+        disable_additional_properties:
+          type: boolean
+          title: Disable Additional Properties
+          description: |
+            用 `json` 約束時，不允許出現 schema 沒宣告的欄位。
+          default: false
+          example: false
+        whitespace_pattern:
+          anyOf:
+            - type: string
+            - type: 'null'
+          title: Whitespace Pattern
+          description: |
+            自訂結構化輸出裡允許的空白樣式。
+    ChatCompletionRequest:
+      properties:
+        model:
+          type: string
+          title: Model
+          description: |
+            要用哪個模型。**這個值由端點決定，不要自己組**——文字端點填平台的 LLM ID（清單見 Chat V2 的 `GET /public/chat/v2/models`），visual 端點填 `vlm-v3.11`。填錯會被上游的 vLLM 直接拒絕。
+          example: fedgpt-moe-1.10.14
+        messages:
+          anyOf:
+            - type: string
+            - items:
+                type: object
+              type: array
+          title: Messages
+          description: |
+            對話內容，OpenAI 格式。**這個端點沒有對話狀態**，要延續脈絡就把先前的往返一起帶上。
+
+            visual 端點的 `content` 可以是 content part 陣列，夾帶 `image_url`。
+          examples:
+            - - content: 請幫我擬一份三年財務計畫
+                role: user
+        temperature:
+          anyOf:
+            - type: number
+            - type: 'null'
+          title: Temperature
+          description: |
+            隨機性。越大回答越有變化，越小越保守、越可重現。
+          default: 0.7
+          example: 0.7
+        top_p:
+          anyOf:
+            - type: number
+            - type: 'null'
+          title: Top P
+          description: |
+            每一步只從累積機率達 P 的 token 裡挑（nucleus sampling）。設 `1` 等於不限制。**與 `top_k` 擇一調整就好**，兩個一起壓容易讓輸出變得死板。
+          default: 1
+          example: 1
+        tools:
+          anyOf:
+            - items:
+                $ref: '#/components/schemas/Tool'
+              type: array
+            - type: 'null'
+          title: Tools
+          description: |
+            提供給模型呼叫的工具清單。模型不會真的去執行，它只會在回應裡指出「要呼叫哪個工具、帶什麼參數」，**實際執行與把結果送回來都是呼叫端的事**。
+        tool_choice:
+          anyOf:
+            - $ref: '#/components/schemas/ToolChoice'
+              title: Tool Choice
+            - type: string
+              enum:
+                - auto
+                - required
+                - none
+          title: Tool Choice
+          description: |
+            要不要用工具。`auto` 讓模型自己決定，`required` 強制至少用一個，`none` 完全不用。也可以指定一個物件強制呼叫某個特定工具。
+          default: auto
+          example: auto
+        logprobs:
+          anyOf:
+            - type: boolean
+            - type: 'null'
+          title: Logprobs
+          description: |
+            是否回傳每個 token 的機率對數，用來評估模型對自己輸出的把握程度。
+          default: false
+          example: false
+        top_logprobs:
+          anyOf:
+            - type: integer
+            - type: 'null'
+          title: Top Logprobs
+          description: |
+            每個位置要回傳前幾名候選 token 的機率。**要先把 `logprobs` 設為 `true` 才有作用。**
+          example: 5
+        'n':
+          anyOf:
+            - type: integer
+            - type: 'null'
+          title: 'N'
+          description: |
+            一次要產生幾個候選回覆。回應的 `choices` 會有這麼多筆，用 `index` 分辨。
+
+            **token 會照倍數消耗**，`usage.completion_tokens` 算的是全部加總。
+          default: 1
+          example: 1
+        logit_bias:
+          anyOf:
+            - additionalProperties:
+                type: number
+              type: object
+            - type: 'null'
+          title: Logit Bias
+          description: |
+            調整特定 token 出現的機率。key 是 token ID，value 是偏移量（正的變常見、負的變罕見）。用來壓掉或偏好特定用字。
+          example:
+            '1234': -100
+        max_tokens:
+          anyOf:
+            - type: integer
+            - type: 'null'
+          title: Max Tokens
+          description: |
+            輸出的最多 token 數。到上限就截斷，所以要留足夠空間給預期的回答長度。
+
+            ⚠️ **不填不等於沒有上限**——平台會補一個預設值上去，而且**各環境不一定相同**。要確定的長度就自己填。
+          example: 2048
+        stop:
+          anyOf:
+            - type: string
+            - items:
+                type: string
+              type: array
+            - type: 'null'
+          title: Stop
+          description: |
+            遇到這些字串就停止產生。**每個停止詞必須能被編碼成單一 token**，多 token 的詞不會生效。
+          example:
+            - \n\n
+        stream:
+          anyOf:
+            - type: boolean
+            - type: 'null'
+          title: Stream
+          description: |
+            `true` 改以 SSE 逐段回傳，適合要即時顯示打字效果的介面。
+          default: false
+          example: false
+        stream_options:
+          anyOf:
+            - $ref: '#/components/schemas/StreamOptions'
+              title: Stream Options
+            - type: 'null'
+          title: Stream Options
+          description: |
+            串流的額外設定。**只有在 `stream: true` 時才要帶。**
+        presence_penalty:
+          anyOf:
+            - type: number
+            - type: 'null'
+          title: Presence Penalty
+          description: |
+            對「已經出現過」的 token 加懲罰，鼓勵模型換個話題。與 `frequency_penalty` 的差別是它只看有沒有出現過，不看出現幾次。
+          default: 0
+          example: 0
+        frequency_penalty:
+          anyOf:
+            - type: number
+            - type: 'null'
+          title: Frequency Penalty
+          description: |
+            依「出現次數」加懲罰，出現越多次壓得越重，用來減少重複用字。
+          default: 0
+          example: 0
+        user:
+          anyOf:
+            - type: string
+            - type: 'null'
+          title: User
+          description: |
+            代表終端使用者的識別碼，OpenAI 相容欄位。
+          example: dfd9f610-bd64-4487-af4a-9578550c09b0
+        response_format:
+          anyOf:
+            - $ref: '#/components/schemas/ResponseFormat'
+              title: Response Format
+            - type: 'null'
+          title: Response Format
+          description: |
+            強制輸出成特定格式，可用的值是 `text`、`json_object`、`json_schema` 三個。
+
+            要用**正規表示式**或**限定選項**來約束輸出的話，不在這個欄位，看 `structured_outputs`。
+        repetition_penalty:
+          anyOf:
+            - type: number
+            - type: 'null'
+          title: Repetition Penalty
+          description: |
+            重複懲罰。`1` 是不懲罰，越大越不容易重複。**這是 vLLM 專屬參數，OpenAI 沒有。**
+          default: 1
+          example: 1
+        ignore_eos:
+          anyOf:
+            - type: boolean
+            - type: 'null'
+          title: Ignore Eos
+          description: |
+            忽略結束符號，讓模型一直產生到 `max_tokens` 為止。通常只在測試吞吐量時才開。**vLLM 專屬參數。**
+          default: false
+          example: false
+        skip_special_tokens:
+          anyOf:
+            - type: boolean
+            - type: 'null'
+          title: Skip Special Tokens
+          description: |
+            輸出時是否濾掉特殊 token（例如結束符號）。**vLLM 專屬參數。**
+          default: true
+          example: true
+        spaces_between_special_tokens:
+          anyOf:
+            - type: boolean
+            - type: 'null'
+          title: Spaces Between Special Tokens
+          description: |
+            特殊 token 前後要不要補空白。**vLLM 專屬參數。**
+          default: true
+          example: true
+        top_k:
+          anyOf:
+            - type: integer
+            - type: 'null'
+          title: Top K
+          description: |
+            每一步只從機率最高的前 K 個 token 裡挑。**vLLM 專屬參數**，與 `top_p` 擇一調整就好。
+          default: 40
+          example: 40
+        seed:
+          anyOf:
+            - type: integer
+            - type: 'null'
+          title: Seed
+          description: |
+            取樣的亂數種子。同樣的輸入配同樣的 seed 會得到相近的結果，但**不保證完全一致**。
+          example: 42
+        min_tokens:
+          anyOf:
+            - type: integer
+            - type: 'null'
+          title: Min Tokens
+          description: |
+            輸出的最少 token 數，用來避免模型草率地只回一兩句就停。**在達到這個數量之前，結束符號會被忽略。**
+
+            **vLLM 專屬參數**，OpenAI 沒有。
+          example: 1
+        min_p:
+          type: number
+          title: Min P
+          description: |
+            最低機率門檻，會按最可能的那個 token 的機率等比縮放。典型值 0.01–0.2，效果相當於 `top_p` 的 0.99–0.8。設 `0` 等於關閉。**vLLM 專屬參數。**
+          default: 0
+          example: 0
+        chat_template_kwargs:
+          anyOf:
+            - $ref: '#/components/schemas/ChatTemplateKwargs'
+            - type: 'null'
+          title: Chat Template Kwargs
+          description: |
+            傳給上游 chat template 的參數。**開啟思考模式就是靠這個欄位**：
+
+            ```json
+            { "chat_template_kwargs": { "enable_thinking": true } }
+            ```
+
+            思考過程會放在 `message.reasoning`（串流時是 `delta.reasoning`），`content` 只有最後的答案。
+
+            ⚠️ **只有文字端點（`/fedgpt/v1/chat/completions`）支援。** visual 端點的上游沒有開 reasoning parser，送過去**會靜靜失效**——照樣回 `200`、`reasoning` 仍是 `null`、不會有任何錯誤訊息。
+
+            ⚠️ **不要用「有沒有報錯」判斷有沒有生效**，要看 `reasoning` 有沒有值。
+
+            **vLLM 專屬參數**，OpenAI 沒有。
+        structured_outputs:
+          anyOf:
+            - $ref: '#/components/schemas/StructuredOutputs'
+            - type: 'null'
+          title: Structured Outputs
+          description: |
+            用結構化約束綁住輸出。**`response_format` 做不到的正規表示式與限定選項在這裡。**
+
+            **vLLM 專屬參數**，OpenAI 沒有。
+      type: object
+      required:
+        - model
+        - messages
+      title: ChatCompletionRequest
+      description: |
+        OpenAI 相容的 chat completion 請求。文字端點與 visual 端點共用同一份 schema，差別只在 `model` 要填什麼、以及 `messages` 能不能夾帶圖片。
+    ChatCompletionMessage:
+      type: object
+      title: ChatCompletionMessage
+      description: |
+        助理的回覆訊息。
+      properties:
+        role:
+          type: string
+          enum:
+            - assistant
+          description: |
+            固定是 `assistant`。
+          example: assistant
+        content:
+          type:
+            - string
+            - 'null'
+          description: |
+            回覆內容。**思考過程不在這裡**——有開思考模式時它在 `reasoning`，這個欄位只有最後的答案。
+          example: 3 加 5 等於 **8**。
+        reasoning:
+          type:
+            - string
+            - 'null'
+          description: |
+            思考過程。**只有請求帶了 `chat_template_kwargs.enable_thinking: true` 才有值，否則是 `null`。**
+
+            ⚠️ **語言不一定跟著提問走**——實測四次中文提問，`content` 都是中文，但 `reasoning` 都是英文為主。要顯示給終端使用者看的話請自行確認。
+          example: '*   Input: "3 加 5 等於多少？" — a simple arithmetic question.'
+        tool_calls:
+          type: array
+          description: |
+            模型要求呼叫的工具。沒有時是空陣列。
+          items:
+            type: object
+            additionalProperties: true
+        refusal:
+          type:
+            - string
+            - 'null'
+          description: |
+            模型拒答的原因。
+    ChatCompletion:
+      type: object
+      title: ChatCompletion
+      description: |
+        OpenAI 格式的 chat completion 回應。
+
+        ⚠️ 上游 vLLM 還會多回幾個非 OpenAI 標準的欄位（`stop_reason`、`token_ids`、`routed_experts`、`prompt_logprobs`、`prompt_token_ids`、`prompt_text`、`kv_transfer_params`、`service_tier`），**平常都是 `null`**，這裡不逐一列出。不要依賴它們。
+      properties:
+        id:
+          type: string
+          description: |
+            這次請求的識別碼。
+          example: chatcmpl-0709d4fc57314ca3997c73b79f27005e
+        object:
+          type: string
+          description: |
+            固定值。串流時每一則是 `chat.completion.chunk`。
+          enum:
+            - chat.completion
+          example: chat.completion
+        created:
+          type: integer
+          description: |
+            建立時間，Unix 秒數。
+          example: 1719504000
+        model:
+          type: string
+          description: |
+            實際產生這次回應的模型。
+          example: fedgpt-moe-1.10.14
+        system_fingerprint:
+          type:
+            - string
+            - 'null'
+          description: |
+            上游 vLLM 的版本指紋。
+          example: vllm-0.23.0-8452db52
+        choices:
+          type: array
+          description: |
+            產生的回覆。筆數等於請求的 `n`（預設 1）。
+          items:
+            type: object
+            properties:
+              index:
+                type: integer
+                description: |
+                  第幾個候選。
+                example: 0
+              message:
+                $ref: '#/components/schemas/ChatCompletionMessage'
+              finish_reason:
+                type: string
+                description: |
+                  結束原因。
+
+                  | 值 | 意思 |
+                  | --- | --- |
+                  | `stop` | 模型自己說完了 |
+                  | `length` | 撞到 `max_tokens` 被截斷 |
+                  | `tool_calls` | 模型要求呼叫工具 |
+                example: stop
+              logprobs:
+                type:
+                  - object
+                  - 'null'
+                description: |
+                  token 的機率資訊，**只有請求帶了 `logprobs: true` 才有**。
+        usage:
+          type: object
+          description: |
+            token 用量。
+          properties:
+            prompt_tokens:
+              type: integer
+              description: |
+                輸入用掉的 token。
+              example: 24
+            completion_tokens:
+              type: integer
+              description: |
+                輸出用掉的 token。
+
+                ⚠️ **開啟思考模式時，`reasoning` 的 token 也算在這裡**——實測同一題關閉是 279、開啟是 657。而且回應**沒有 `completion_tokens_details`**，所以**拆不出思考佔了多少**。
+              example: 110
+            total_tokens:
+              type: integer
+              description: |
+                兩者相加。
+              example: 134
+    ChatCompletionChunk:
+      type: object
+      title: ChatCompletionChunk
+      description: |
+        串流回應的其中一則，**OpenAI 的 `chat.completion.chunk` 格式**。
+
+        ⚠️ **`delta.content` 是增量不是累積**，要自己串接起來。（Chat V2 那幾支串流端點相反，是累積式的——見 **SSE 串流** 分頁的對照表。）
+
+        ⚠️ **整串的最後一則是字面上的 `data: [DONE]`**，那不是 JSON，不要拿去 parse。收到它才代表串流正常結束。
+      properties:
+        id:
+          type: string
+          description: |
+            這次請求的識別碼，**同一串流的每一則都相同**。
+          example: chatcmpl-c54be07fa94ddbfd6abe48e5488dd277
+        object:
+          type: string
+          description: |
+            固定值，用來與非串流回應的 `chat.completion` 區分。
+          enum:
+            - chat.completion.chunk
+          example: chat.completion.chunk
+        created:
+          type: integer
+          description: |
+            建立時間，Unix 秒數。
+          example: 1719504000
+        model:
+          type: string
+          description: |
+            實際產生這串回應的模型。
+          example: fedgpt-moe-1.10.14
+        choices:
+          type: array
+          description: |
+            這一則的內容。`n` 沒特別指定時只有一筆。
+          items:
+            type: object
+            properties:
+              index:
+                type: integer
+                description: |
+                  對應到請求裡的第幾個候選（`n` > 1 時才會超過 0）。
+                example: 0
+              delta:
+                type: object
+                description: |
+                  **這一則新增的內容**，不是累積值。
+                properties:
+                  role:
+                    type: string
+                    description: |
+                      發話者。**只有第一則會帶**，之後省略。
+                    enum:
+                      - assistant
+                    example: assistant
+                  content:
+                    type: string
+                    description: |
+                      新增的文字片段。
+                    example: Hello
+                  reasoning:
+                    type: string
+                    description: |
+                      新增的思考片段。**只有開了 `chat_template_kwargs.enable_thinking` 才會出現。**
+
+                      ⚠️ **思考會先全部送完，才開始送 `content`，兩者不交錯**——實測 112 則 chunk 裡前 98 則帶 `reasoning`、後 10 則帶 `content`。**收到第一則 `content` 就代表思考結束了。**
+                    example: '*   Input: a simple arithmetic question.'
+              finish_reason:
+                type:
+                  - string
+                  - 'null'
+                description: |
+                  結束原因。**還沒結束的每一則都是 `null`**，只有最後一則有值。
+
+                  | 值 | 意思 |
+                  | --- | --- |
+                  | `stop` | 模型自己說完了 |
+                  | `length` | 撞到 `max_tokens` 被截斷 |
+                example: stop
+    UpstreamError:
+      type: object
+      title: UpstreamError
+      description: |
+        上游 vLLM 回的錯誤，**OpenAI 的錯誤格式**。
+
+        ⚠️ 這條鏈上有兩種錯誤格式，看是誰擋下來的：
+
+        | 擋下來的是誰 | 形狀 | 什麼時候 |
+        | --- | --- | --- |
+        | 平台的 llm-proxy | 本站台標準的 `Error`（有 `service` / `reason`） | body 不是合法 JSON、沒帶 `model`、找不到預設模型 |
+        | 上游 vLLM | **本 schema**（有 `error` 物件） | 欄位型別錯、缺必填欄位、enum 值不合法、`model` 不存在 |
+
+        **兩種都要能處理**——不能假設一定拿得到 `reason`。
+      properties:
+        error:
+          type: object
+          title: Error
+          properties:
+            message:
+              type: string
+              description: |
+                錯誤說明。驗證失敗時是一段多行文字，裡面會指出是哪個欄位（例如 `('body', 'top_k')`）以及期望的型別。
+              example: |-
+                1 validation error:
+                  {'type': 'int_parsing', 'loc': ('body', 'top_k'), 'msg': 'Input should be a valid integer'}
+            type:
+              type: string
+              description: |
+                錯誤類別。
+              example: BadRequestError
+            param:
+              type:
+                - string
+                - 'null'
+              description: |
+                出問題的參數名，判斷不出來時是 `null`。
+              example: model
+            code:
+              type: integer
+              description: |
+                與 HTTP status 相同。
+              example: 400
+    CreateEmbeddingRequest:
+      type: object
+      required:
+        - model
+        - input
+      title: CreateEmbeddingRequest
+      description: |
+        OpenAI 相容的 embedding 請求。把文字轉成向量，常用來做語意檢索。
+      properties:
+        input:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: string
+              minItems: 1
+              maxItems: 2048
+            - type: array
+              items:
+                type: integer
+              minItems: 1
+              maxItems: 2048
+            - type: array
+              items:
+                type: array
+                items:
+                  type: integer
+              minItems: 1
+              maxItems: 2048
+          title: Input
+          description: |
+            要轉成向量的內容。可以是單一字串、字串陣列，或已經斷好詞的 token ID 陣列。
+
+            **一次最多 2048 筆**，回傳的 `data` 會按 `index` 對應回這裡的順序。單筆長度受模型的 context 上限限制，超過會被拒。
+          example:
+            - 出差申請須於出發前三個工作日完成線上簽核。
+            - 年度特休可遞延至隔年三月底前使用。
+        model:
+          type: string
+          title: Model
+          description: |
+            要用的 embedding 模型。**這條端點固定填 `embedding-v3.0`。**
+
+            ⚠️ **查詢與建立索引必須用同一個模型**——不同模型產生的向量不在同一個空間，混用比出來的相似度沒有意義。
+          example: embedding-v3.0
+        encoding_format:
+          type: string
+          title: Encoding Format
+          enum:
+            - float
+            - base64
+          default: float
+          description: |
+            向量的回傳格式。`float` 是數字陣列（好讀）；`base64` 體積較小，適合大量傳輸。
+          example: float
+        dimensions:
+          anyOf:
+            - type: integer
+              minimum: 1
+            - type: 'null'
+          title: Dimensions
+          description: |
+            指定輸出向量的維度。不填就用模型的原生維度。**只有支援降維的模型才會生效。**
+          example: 1024
+        user:
+          anyOf:
+            - type: string
+            - type: 'null'
+          title: User
+          description: |
+            代表終端使用者的識別碼，OpenAI 相容欄位。
+          example: dfd9f610-bd64-4487-af4a-9578550c09b0
+    Embedding:
+      type: object
+      required:
+        - object
+        - index
+        - embedding
+      title: Embedding
+      description: |
+        單一筆輸入轉出來的向量。
+      properties:
+        object:
+          type: string
+          description: |
+            固定是 `embedding`。
+          enum:
+            - embedding
+          example: embedding
+        index:
+          type: integer
+          description: |
+            對應到 `input` 裡的第幾筆，從 `0` 起算。
+          example: 0
+        embedding:
+          type: array
+          items:
+            type: number
+          description: |
+            向量本身。長度由模型（或 `dimensions`）決定。
+          example:
+            - 0.0123
+            - -0.0456
+            - 0.0789
+    EmbeddingUsage:
+      type: object
+      required:
+        - prompt_tokens
+        - total_tokens
+      title: EmbeddingUsage
+      description: |
+        這次請求的 token 用量。
+      properties:
+        prompt_tokens:
+          type: integer
+          description: |
+            輸入文字換算的 token 數。
+          example: 42
+        total_tokens:
+          type: integer
+          description: |
+            總計 token 數。embedding 沒有輸出 token，所以通常與 `prompt_tokens` 相同。
+          example: 42
+    CreateEmbeddingResponse:
+      type: object
+      required:
+        - object
+        - data
+        - model
+        - usage
+      title: CreateEmbeddingResponse
+      description: |
+        OpenAI 相容的 embedding 回應。
+      properties:
+        object:
+          type: string
+          description: |
+            固定是 `list`。
+          enum:
+            - list
+          example: list
+        data:
+          type: array
+          description: |
+            每一筆輸入對應一個向量，**順序以各項的 `index` 為準**。
+          items:
+            $ref: '#/components/schemas/Embedding'
+        model:
+          type: string
+          description: |
+            實際用來產生這批向量的模型。**建索引時把它一起存下來**，之後才知道查詢要用哪個模型。
+          example: embedding-v3.0
+        usage:
+          $ref: '#/components/schemas/EmbeddingUsage'
+    VisualChatCompletionRequest:
+      $ref: '#/components/schemas/ChatCompletionRequest'
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        `Authorization: Bearer <api-key>`，內容就是 personal API key——與 `X-Api-Key` 是同一把金鑰、同一套權限，只是換了 header。OpenAI SDK 與相容工具的預設寫法。
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-Api-Key
+    AccessToken:
+      type: apiKey
+      in: header
+      name: X-Access-Token

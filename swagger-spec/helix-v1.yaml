@@ -1,0 +1,604 @@
+openapi: 3.1.0
+info:
+  version: latest
+  title: FedGPT Helix V1 API
+  description: |
+    聲紋辨識。註冊一個人的聲音，之後就能從一段錄音裡認出是誰在講話。
+
+    ## 兩組端點，差別在「誰記住 voiceId」
+
+    ⚠️ **這是本頁最重要的一件事。** 兩組端點做的事很像，但責任歸屬完全不同：
+
+    | 項目 | `/enrollment` | `/voices` |
+    | --- | --- | --- |
+    | 一個帳號能有幾組聲紋 | **只有一組**（就是你自己的） | 想建幾組就幾組 |
+    | 怎麼指定要操作哪一組 | 不用指定，**一律是呼叫者自己的** | 路徑上帶 `voiceId` |
+    | 誰記住 `voiceId` | **FedGPT 記**，它存了「帳號 ↔ voiceId」的對應 | **你自己記**，FedGPT 不留任何紀錄 |
+    | `voiceId` 弄丟了 | 不會，打 `GET /enrollment` 就查得回來 | **救不回來**，只能請管理員從 helix 撈 |
+
+    **選哪一組？**
+
+    - 幫**登入的使用者本人**註冊聲音（例如會議記錄要標出誰在講話）→ 用 `/enrollment`
+    - 你的系統要**代管一群人的聲紋**（例如客戶的整合，一個帳號底下管很多人）→ 用 `/voices`，並自己把 `voiceId` 存起來
+
+    兩組端點都要通過同一套認證。
+
+    ## 認人的流程
+
+    1. 用上面任一組端點註冊聲紋，拿到 `voiceId`
+    2. 把要辨識的錄音丟給 `POST /public/helix/v1/voices:searchByAudio`，並附上要比對的 `voiceIds` 清單
+    3. 回應會給你逐句的辨識文字，以及每個說話者比對到誰
+
+    ## 時間格式
+
+    `start` / `end` 是**毫秒**；`lastUpdatedAt` 是 RFC3339 字串。
+servers:
+  - description: API
+    url: /api
+security:
+  - ApiKeyAuth: []
+  - AccessToken: []
+tags:
+  - name: Enrollment
+    description: 註冊「呼叫者自己」的聲紋。FedGPT 記住對應關係，一個帳號一組。
+  - name: Voices
+    description: 用 `voiceId` 直接管理聲紋，以及從錄音中辨識說話者。呼叫端自己記住 `voiceId`。
+paths:
+  /public/helix/v1/enrollment:
+    get:
+      tags:
+        - Enrollment
+      summary: 查自己的聲紋註冊狀態
+      description: |
+        查呼叫者自己有沒有註冊過聲紋。**沒註冊也是 `200`**，看回應的 `enrolled` 判斷。
+
+        這也是把 `voiceId` 查回來的地方——`/enrollment` 這組不需要自己保存 `voiceId`。
+      responses:
+        '200':
+          description: |
+            目前的註冊狀態。**沒註冊時只會有 `enrolled: false`**，其餘欄位不會出現。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EnrollmentStatus'
+    post:
+      tags:
+        - Enrollment
+      summary: 註冊自己的聲紋
+      description: |
+        用一段或多段錄音註冊呼叫者自己的聲紋。
+
+        錄音先走 Asset V2 分頁的上傳流程拿到 `assetKey`，再把 key 填進 `audioKeys`。**送進來的錄音會被永久保存**，之後聲紋模型更新時可以拿同一批重新訓練。
+
+        ⚠️ **一個帳號只能有一組。** 已經註冊過會拿到 `409 data.unique`——要重新註冊請先 `DELETE` 再建。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EnrollmentInput'
+      responses:
+        '200':
+          description: 註冊成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EnrollmentSummary'
+        '400':
+          description: |
+            `audioKeys` 裡有 key 對不到已上傳的檔案（`reason` 為 `data.validation`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: |
+            這個帳號已經註冊過了（`reason` 為 `data.unique`）。**請先刪除舊的再重新註冊。**
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    delete:
+      tags:
+        - Enrollment
+      summary: 刪除自己的聲紋
+      description: |
+        刪掉呼叫者自己的聲紋註冊。刪完之後 `GET` 會回 `enrolled: false`，可以重新註冊。
+
+        **要重新錄製聲紋就是走這條**——沒有「更新」的端點，先刪再建。
+      responses:
+        '200':
+          description: |
+            刪除成功。**回應是空物件 `{}`。**
+          content:
+            application/json:
+              schema:
+                type: object
+        '404':
+          description: |
+            這個帳號本來就沒有註冊（`reason` 為 `data.not-found`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /public/helix/v1/voices:
+    post:
+      tags:
+        - Voices
+      summary: 建立一組聲紋
+      description: |
+        用錄音建立一組新的聲紋，回傳 `voiceId`。
+
+        ⚠️ **`voiceId` 一定要自己存起來。** 與 `/enrollment` 不同，**FedGPT 不會記錄這組聲紋屬於誰**——沒有任何端點可以列出「我建過哪些聲紋」。弄丟了只能請管理員從 helix 撈。
+
+        要幫登入的使用者本人註冊、又不想自己管 `voiceId` 的話，改用 `POST /public/helix/v1/enrollment`。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VoiceCreateInput'
+      responses:
+        '200':
+          description: |
+            建立成功。**`voiceId` 只在這裡出現，請立刻存起來。**
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VoiceCreateOutput'
+        '400':
+          description: |
+            `audioUris` 是空的或超過 5 段（`reason` 為 `data.validation`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /public/helix/v1/voices/{voiceId}:
+    parameters:
+      - name: voiceId
+        in: path
+        required: true
+        schema:
+          type: string
+          example: 1f0a7e89-7b30-4d2a-9b5d-3a13a14a5e07
+        description: |
+          聲紋的識別碼，從 `POST /public/helix/v1/voices` 的回應取得。
+    get:
+      tags:
+        - Voices
+      summary: 查一組聲紋的內容
+      description: |
+        看這組聲紋是用哪幾段錄音建的，以及最後一次寫入時用的模型。
+
+        **可以拿來在介面上顯示「已註冊 N 段錄音」。**
+      responses:
+        '200':
+          description: 這組聲紋的詳細內容
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VoiceDetail'
+        '404':
+          description: |
+            `voiceId` 不存在（`reason` 為 `data.not-found`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    delete:
+      tags:
+        - Voices
+      summary: 刪除一組聲紋
+      description: |
+        把這組聲紋從系統移除，無法復原。
+
+        **重複刪除是安全的**——已經刪掉的再刪一次會拿到 `404`，不會有其他副作用。
+      responses:
+        '200':
+          description: |
+            刪除成功。**回應是空物件 `{}`。**
+          content:
+            application/json:
+              schema:
+                type: object
+        '404':
+          description: |
+            `voiceId` 不存在，或已經被刪掉了（`reason` 為 `data.not-found`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /public/helix/v1/voices:searchByAudio:
+    post:
+      tags:
+        - Voices
+      summary: 從錄音辨識說話者
+      description: |
+        送一段錄音進來，回傳**逐句的辨識文字**，以及**每個說話者比對到哪組聲紋**。多人對話可以直接送。
+
+        ## 這是同步的，而且會等很久
+
+        ⚠️ **一個請求跑完整條流程**：語音辨識 → 抽取聲紋特徵 → 比對。回應要等到全部做完才會回來。
+
+        **請把 client 的 timeout 調長。** 伺服器端每一步各等最多 **30 分鐘**，整個請求的上限也是 30 分鐘。實際時間主要花在語音辨識上，短音檔通常幾秒到一分鐘。
+
+        ## 只做中文
+
+        ⚠️ **語音辨識的語言固定是中文（`zh`），不能指定。** 需要其他語言請改用 Asura V1 分頁自己跑辨識，再自行處理比對。
+
+        ## `voiceIds` 是必填的
+
+        只會在你給的名單裡比對。**不能傳空清單**——那會變成在全部聲紋裡搜尋，等於看得到別人的資料，所以直接擋掉。
+
+        ## 怎麼用回應
+
+        `sentences[].speakerId` 與 `speakers[].speakerId` 對起來，就知道每一句是誰講的。`voiceId` 對應到誰的名字要你自己維護。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VoiceSearchByAudioInput'
+      responses:
+        '200':
+          description: 逐句文字與每位說話者的比對結果
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VoiceSearchByAudioOutput'
+        '400':
+          description: |
+            `audioUri` 沒帶，或 `voiceIds` 是空的（`reason` 為 `data.validation`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '504':
+          description: |
+            語音辨識或聲紋抽取超過 30 分鐘（`reason` 為 `http.timeout`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+components:
+  schemas:
+    EnrollmentStatus:
+      type: object
+      description: |
+        呼叫者目前的註冊狀態。
+      required:
+        - enrolled
+      properties:
+        enrolled:
+          type: boolean
+          description: |
+            **有沒有註冊過。** `false` 時下面兩個欄位都不會出現。
+          example: true
+        voiceId:
+          type: string
+          description: |
+            這組聲紋的識別碼。要拿去 `voices:searchByAudio` 比對時用得到。
+          example: 1f0a7e89-7b30-4d2a-9b5d-3a13a14a5e07
+        audioUris:
+          type: array
+          description: |
+            當初註冊用的錄音，永久網址。
+
+            **早期註冊的可能沒有這個欄位**——保存原始錄音是後來才加的，在那之前註冊的只有聲紋、沒有留錄音。
+          items:
+            type: string
+            example: https://storage.example.com/fedgpt/helix_enrollment/RdVLzq5hUIv1UBhvriveu
+          example:
+            - https://storage.example.com/fedgpt/helix_enrollment/RdVLzq5hUIv1UBhvriveu
+            - https://storage.example.com/fedgpt/helix_enrollment/t2lrEdYO0SNZIsdjod7L4
+    EnrollmentInput:
+      type: object
+      description: |
+        註冊呼叫者自己的聲紋。
+      required:
+        - audioKeys
+      properties:
+        audioKeys:
+          type: array
+          description: |
+            錄音的 `assetKey`，來自 Asset V2 分頁的上傳流程。
+
+            **這些是暫存的 key，送進來之後會被轉成永久保存**，原始錄音會留著——之後 helix 換聲紋模型時可以拿同一批錄音重新訓練，不必請使用者重錄。
+
+            永久保存後的網址可以從 `GET /public/helix/v1/enrollment` 的 `audioUris` 取回。
+          items:
+            type: string
+            example: tmp/RdVLzq5hUIv1UBhvriveu
+          example:
+            - tmp/RdVLzq5hUIv1UBhvriveu
+            - tmp/t2lrEdYO0SNZIsdjod7L4
+    EnrollmentSummary:
+      type: object
+      description: |
+        註冊成功後的結果。
+      required:
+        - voiceId
+        - utteranceCount
+      properties:
+        voiceId:
+          type: string
+          description: |
+            這組聲紋的識別碼。**不需要自己存**——`GET /public/helix/v1/enrollment` 隨時查得回來。
+          example: 1f0a7e89-7b30-4d2a-9b5d-3a13a14a5e07
+        utteranceCount:
+          type: integer
+          description: |
+            實際採用了幾段錄音。
+          example: 2
+    Error:
+      type: object
+      description: |
+        所有錯誤回應的共通格式。`reason` 的完整清單與觸發情境見 Common 分頁。
+      required:
+        - service
+        - reason
+        - message
+      properties:
+        service:
+          type: string
+          description: |
+            產生這個錯誤的後端元件名。回報問題時附上它，可以直接定位到是哪個服務出錯——也是判斷 `reason` 屬於哪一組命名空間的依據。
+          example: http-gateway
+        reason:
+          type: string
+          description: |
+            錯誤代碼。**程式請用這個欄位做分支**，不要去解析 `message`。
+          example: data.validation
+        message:
+          type: string
+          description: |
+            人類可讀的錯誤說明。**措辭與內容不保證穩定**，可能隨版本改變，不要拿來做程式判斷。
+          example: invalid request body
+        field:
+          type: string
+          description: |
+            造成錯誤的欄位名，主要由 `data.validation` 帶上。**不是每個錯誤都有**——沒有的時候這個欄位整個不會出現在回應裡。
+          example: convId
+    VoiceCreateInput:
+      type: object
+      description: |
+        用一段或多段錄音建立一組聲紋。
+      required:
+        - audioUris
+      properties:
+        audioUris:
+          type: array
+          minItems: 1
+          maxItems: 5
+          description: |
+            錄音的位置，**必須是 FedGPT 連得到的**。
+
+            **至少 1 段、最多 5 段**——空的或超過 5 段都會拿到 `400 data.validation`。上限是 gateway 這側加的保護，避免打錯字送出巨量請求。
+
+            沒有可公開存取的檔案服務的話，可以走 Asset V2 分頁上傳，再把拿到的網址填進來。
+          items:
+            type: string
+            example: https://storage.example.com/audio/voice_sample_1.wav
+          example:
+            - https://storage.example.com/audio/voice_sample_1.wav
+            - https://storage.example.com/audio/voice_sample_2.wav
+    VoiceCreateOutput:
+      type: object
+      description: |
+        建立成功後的結果。
+      required:
+        - voiceId
+        - utteranceCount
+      properties:
+        voiceId:
+          type: string
+          description: |
+            新聲紋的識別碼。
+
+            ⚠️ **一定要自己存起來。** FedGPT 不會記錄這組聲紋屬於誰，弄丟了就查不回來，只能請管理員從 helix 撈。
+          example: 1f0a7e89-7b30-4d2a-9b5d-3a13a14a5e07
+        utteranceCount:
+          type: integer
+          description: |
+            實際採用了幾段錄音。
+          example: 1
+    VoiceUtterance:
+      type: object
+      description: |
+        構成這組聲紋的其中一段錄音。
+      required:
+        - id
+        - audioUri
+      properties:
+        id:
+          type: string
+          description: |
+            這段錄音在 helix 裡的識別碼。
+          example: 8K65Qr3rRxyv116m2CP0Z
+        audioUri:
+          type: string
+          description: |
+            建立時提供的錄音位置。
+          example: https://storage.example.com/audio/voice_sample_1.wav
+    VoiceDetail:
+      type: object
+      description: |
+        一組聲紋的詳細內容。
+      required:
+        - voiceId
+        - utteranceCount
+        - utterances
+        - model
+        - lastUpdatedAt
+      properties:
+        voiceId:
+          type: string
+          description: |
+            這組聲紋的識別碼。
+          example: 1f0a7e89-7b30-4d2a-9b5d-3a13a14a5e07
+        utteranceCount:
+          type: integer
+          description: |
+            目前有幾段錄音。等於 `utterances` 的長度。
+          example: 3
+        utterances:
+          type: array
+          description: |
+            構成這組聲紋的錄音。**可以拿來在介面上顯示「已註冊 N 段」。**
+          items:
+            $ref: '#/components/schemas/VoiceUtterance'
+        model:
+          type: string
+          description: |
+            最後一次寫入時，helix 用的聲紋模型。
+          example: vocal-sense-v3
+        lastUpdatedAt:
+          type: string
+          description: |
+            最後一次寫入的時間，RFC3339 字串。
+          example: '2024-06-28T00:00:00+08:00'
+    VoiceSearchByAudioInput:
+      type: object
+      description: |
+        從一段錄音裡認出說話的是誰。
+      required:
+        - audioUri
+        - voiceIds
+      properties:
+        audioUri:
+          type: string
+          description: |
+            要辨識的錄音位置，**必須是 FedGPT 連得到的**。
+
+            **多人對話可以直接送**——系統會先切分說話者，再逐一比對。
+          example: https://storage.example.com/audio/meeting.wav
+        voiceIds:
+          type: array
+          minItems: 1
+          description: |
+            要比對的候選名單。**必填且不能是空的。**
+
+            只會在這份名單裡找，不在名單上的聲紋不會被比對到。空清單被擋掉是刻意的——否則會變成在全部聲紋裡搜尋，等於看得到別人的資料。
+          items:
+            type: string
+            example: 1f0a7e89-7b30-4d2a-9b5d-3a13a14a5e07
+          example:
+            - 1f0a7e89-7b30-4d2a-9b5d-3a13a14a5e07
+            - 2c1b8f90-8c41-4e3b-ac6e-4b24b25b6f18
+    VoiceSearchSentence:
+      type: object
+      description: |
+        辨識出來的一句話。
+      required:
+        - speakerId
+        - sentence
+        - start
+        - end
+      properties:
+        speakerId:
+          type: string
+          description: |
+            說話者的編號，**只在這次辨識裡有意義**（`0`、`1`、`2`…）。它不是 `voiceId`。
+
+            **同一個人講的每一句都會是同一個 `speakerId`**——用它跟 `speakers[].speakerId` 對起來，就知道這句是誰講的。
+          example: '0'
+        sentence:
+          type: string
+          description: |
+            這句話的文字。
+          example: 大家好，今天我們來討論第三季的營收。
+        start:
+          type: integer
+          description: |
+            起始時間，**毫秒**，相對於錄音開頭。
+          example: 0
+        end:
+          type: integer
+          description: |
+            結束時間，**毫秒**，相對於錄音開頭。
+          example: 2500
+    VoiceSearchMatch:
+      type: object
+      description: |
+        一個比對結果。
+      required:
+        - voiceId
+        - similarityScore
+      properties:
+        voiceId:
+          type: string
+          description: |
+            比對到的聲紋，來自你送出的 `voiceIds`。
+          example: 1f0a7e89-7b30-4d2a-9b5d-3a13a14a5e07
+        similarityScore:
+          type: number
+          format: float
+          description: |
+            相似度，**越高越像**。
+
+            ⚠️ **這裡不做門檻判斷，再低的分數也會回來。** 要不要採信由你決定——`0.5` 是常見的起點，實際門檻請自己用真實資料調。
+          example: 0.91
+    VoiceSearchSpeaker:
+      type: object
+      description: |
+        一個說話者的比對結果。
+      required:
+        - speakerId
+        - matches
+      properties:
+        speakerId:
+          type: string
+          description: |
+            說話者的編號，與 `sentences[].speakerId` 對應。
+          example: '0'
+        matches:
+          type: array
+          description: |
+            比對結果，**已依相似度排序，`matches[0]` 就是最佳猜測**。
+
+            **可能是空陣列**——名單裡沒有人像這位說話者時就會是空的。說話人數多於候選名單時尤其容易發生（一個 `voiceId` 不會被指派給兩個人）。
+          items:
+            $ref: '#/components/schemas/VoiceSearchMatch'
+    VoiceSearchByAudioOutput:
+      type: object
+      description: |
+        辨識結果，分成兩份：逐句的文字（`sentences`）與每位說話者比對到誰（`speakers`）。
+
+        ## 怎麼組出「誰講了什麼」
+
+        兩份用 `speakerId` 對起來：
+
+        ```
+        sentences[].speakerId  ──對應──  speakers[].speakerId
+                                              └─ matches[0].voiceId  ──▶ 你自己的名字對照表
+        ```
+
+        `voiceId` 對應到誰的名字，**要你自己維護**——FedGPT 這邊只有聲紋，沒有姓名。
+
+        **`sentences` 裡出現過的每個 `speakerId` 都保證會出現在 `speakers` 裡**（沒比對到的話 `matches` 是空陣列），所以不必擔心對不到。
+      required:
+        - sentences
+        - speakers
+      properties:
+        sentences:
+          type: array
+          description: |
+            逐句的辨識文字，依時間排序。
+          items:
+            $ref: '#/components/schemas/VoiceSearchSentence'
+        speakers:
+          type: array
+          description: |
+            每位說話者的比對結果。
+          items:
+            $ref: '#/components/schemas/VoiceSearchSpeaker'
+  parameters: {}
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-Api-Key
+    AccessToken:
+      type: apiKey
+      in: header
+      name: X-Access-Token

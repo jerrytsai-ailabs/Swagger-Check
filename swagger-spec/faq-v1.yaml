@@ -1,0 +1,719 @@
+openapi: 3.1.0
+info:
+  version: latest
+  title: FedGPT FAQ V1 API
+  description: |
+    管理常見問答集。建好之後可以在 Chat V2 的 `faq` 模式裡使用——使用者提問時，模型會先從你維護的問答對裡找答案，而不是自己生成。
+
+    ## 兩層結構
+
+    ```
+    FAQ（一個問答集）
+     └── entry（一組問與答）× 多筆
+    ```
+
+    **FAQ 是容器，entry 才是內容。** 一個 FAQ 底下可以放很多 entry，通常按主題或適用對象分成不同的 FAQ（例如「客服常見問題」與「內部人事問答」各一個）。
+
+    建立順序：先 `POST /public/faq/v1/faqs` 建 FAQ 拿到 `faqId`，再往它底下 `POST .../faqs/{faqId}/entries` 加 entry。
+
+    ## 怎麼接到 Chat V2
+
+    建好的 `faqId` 填進 Chat V2 建立對話時的 `params`（`mode: faq`，**至少一個，可以多個**）。詳見 Chat V2 分頁。
+
+    ## 權限是兩層
+
+    | 層級 | 要求 |
+    | --- | --- |
+    | **端點層** | 本頁**所有**端點都需要 `faq.admin` 權限 |
+    | **資源層** | 再逐個 FAQ 查 ACL：讀取要 `read`、修改要 `edit`、刪除 FAQ 要 `delete` |
+
+    兩層都要過。有 `faq.admin` 但沒有某個 FAQ 的 ACL，一樣讀不到那一筆。
+
+    ⚠️ **ACL 掛在 FAQ 上，entry 沒有自己的權限。** 動 entry（新增／修改／刪除）看的是所屬 FAQ 的 `edit`——所以**刪一筆 entry 只要 `edit`，但刪整個 FAQ 要 `delete`**。
+
+    建立 FAQ 不需要 ACL（還沒有資源可查），**建立者自動成為該 FAQ 的 `owner`**。
+
+    ## 列表沒有分頁
+
+    `GET /faqs` 與 `GET /faqs/{faqId}/entries` 都是**一次回傳全部**，沒有 `limit` 或 `cursor`。
+
+    而且 `GET /faqs` 回的是**你有 `read` 權限的那些**，不是系統上全部的 FAQ——所以清單長度會因帳號而異。
+servers:
+  - description: API
+    url: /api
+security:
+  - ApiKeyAuth: []
+  - AccessToken: []
+tags:
+  - name: faq
+    description: 問答集本身的建立、查詢、修改與刪除。
+  - name: entry
+    description: 問答集底下的問與答。權限看所屬 FAQ 的 ACL，entry 沒有自己的權限。
+paths:
+  /public/faq/v1/faqs:
+    get:
+      tags:
+        - faq
+      summary: 列出問答集
+      description: |
+        列出你有 `read` 權限的問答集。
+
+        **不是系統上全部的問答集**——回傳前會逐筆查 ACL 過濾掉沒權限的，所以清單長度會因帳號而異。**沒有分頁**，一次回傳全部。
+
+        回傳的內容只有問答集本身的中介資料，**不含底下的 entry**——那要另外打 `GET /faqs/{faqId}/entries`。
+      responses:
+        '200':
+          description: 你有權限讀取的問答集
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - faqs
+                properties:
+                  faqs:
+                    type: array
+                    description: |
+                      問答集清單，不含 entry。
+                    items:
+                      $ref: '#/components/schemas/FAQ'
+        '403':
+          description: |
+            沒有 `faq.admin` 權限（`reason` 為 `auth.forbidden`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    post:
+      tags:
+        - faq
+      summary: 建立問答集
+      description: |
+        建立一個問答集。**這一步只建容器**，問與答要在拿到 `faqId` 之後另外打 entry 的端點加。
+
+        **建立時不查資源 ACL**（還沒有資源可查），只要有 `faq.admin` 權限就能建。**建立者自動成為這個問答集的 `owner`**，因此後續的讀取、修改、刪除都會通過。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - faq
+              properties:
+                faq:
+                  $ref: '#/components/schemas/FAQInput'
+      responses:
+        '200':
+          description: 建立成功，回傳新問答集的 ID
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - faq
+                properties:
+                  faq:
+                    type: object
+                    required:
+                      - faqId
+                    properties:
+                      faqId:
+                        type: string
+                        description: |
+                          新問答集的識別碼。加 entry 與接到 Chat V2 都要用它。
+                        example: Ol5dPKnifWCkroZ0UjvvG
+        '400':
+          description: |
+            `name` 沒帶（`reason` 為 `data.validation`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: |
+            沒有 `faq.admin` 權限（`reason` 為 `auth.forbidden`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /public/faq/v1/faqs/{faqId}:
+    get:
+      tags:
+        - faq
+      summary: 取得單一問答集
+      description: |
+        取得一個問答集的中介資料。**不含底下的 entry**——那要另外打 `GET /faqs/{faqId}/entries`。
+
+        需要這個問答集的 `read` ACL 權限。
+      parameters:
+        - $ref: '#/components/parameters/faqId'
+      responses:
+        '200':
+          description: 問答集的中介資料
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - faq
+                properties:
+                  faq:
+                    $ref: '#/components/schemas/FAQ'
+        '403':
+          description: |
+            沒有這個問答集的 `read` 權限（`reason` 為 `auth.forbidden`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: |
+            問答集不存在（`reason` 為 `data.not-found`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    put:
+      tags:
+        - faq
+      summary: 更新問答集
+      description: |
+        更新問答集的名稱、說明與標籤。**這裡改不到底下的 entry。**
+
+        ⚠️ **這是整體覆寫，不是部分更新。** 沒帶的欄位會被清空——例如只想改 `name` 卻沒帶 `labels`，原有的標籤就會消失。要保留就把現值一起帶上。
+
+        需要這個問答集的 `edit` ACL 權限。
+      parameters:
+        - $ref: '#/components/parameters/faqId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - faq
+              properties:
+                faq:
+                  $ref: '#/components/schemas/FAQInput'
+      responses:
+        '200':
+          description: 更新成功，回傳空物件
+          content:
+            application/json:
+              schema:
+                type: object
+        '400':
+          description: |
+            `name` 沒帶（`reason` 為 `data.validation`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: |
+            沒有這個問答集的 `edit` 權限（`reason` 為 `auth.forbidden`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: |
+            問答集不存在（`reason` 為 `data.not-found`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    delete:
+      tags:
+        - faq
+      summary: 刪除問答集
+      description: |
+        刪除整個問答集**及其底下所有的 entry**。無法復原。
+
+        需要這個問答集的 `delete` ACL 權限——**比刪單筆 entry 嚴格**（那個只要 `edit`）。
+      parameters:
+        - $ref: '#/components/parameters/faqId'
+      responses:
+        '200':
+          description: 刪除成功
+        '403':
+          description: |
+            沒有這個問答集的 `delete` 權限（`reason` 為 `auth.forbidden`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: |
+            問答集不存在（`reason` 為 `data.not-found`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /public/faq/v1/faqs/{faqId}/entries:
+    get:
+      tags:
+        - entry
+      summary: 列出問答集底下的問與答
+      description: |
+        列出指定問答集底下所有的 entry。**沒有分頁**，一次回傳全部。
+
+        需要這個問答集的 `read` ACL 權限。
+      parameters:
+        - $ref: '#/components/parameters/faqId'
+      responses:
+        '200':
+          description: 這個問答集底下的所有問與答
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - entries
+                properties:
+                  entries:
+                    type: array
+                    description: |
+                      問與答清單。
+                    items:
+                      $ref: '#/components/schemas/FAQEntry'
+        '403':
+          description: |
+            沒有這個問答集的 `read` 權限（`reason` 為 `auth.forbidden`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: |
+            問答集不存在（`reason` 為 `data.not-found`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    post:
+      tags:
+        - entry
+      summary: 新增一組問與答
+      description: |
+        在指定的問答集底下新增一組問與答。
+
+        需要**所屬問答集**的 `edit` ACL 權限——entry 沒有自己的權限。
+      parameters:
+        - $ref: '#/components/parameters/faqId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - entry
+              properties:
+                entry:
+                  $ref: '#/components/schemas/FAQEntryInput'
+      responses:
+        '200':
+          description: 建立成功，回傳新問與答的 ID
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - entry
+                properties:
+                  entry:
+                    type: object
+                    required:
+                      - entryId
+                    properties:
+                      entryId:
+                        type: string
+                        description: |
+                          新問與答的識別碼。**只在所屬的問答集內唯一。**
+                        example: 8K65Qr3rRxyv116m2CP0Z
+        '400':
+          description: |
+            `question` 或 `answer` 沒帶、`question` 超過 150 字元，或 `relevantQuestions` 超過 10 個（`reason` 為 `data.validation`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: |
+            沒有所屬問答集的 `edit` 權限（`reason` 為 `auth.forbidden`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: |
+            問答集不存在（`reason` 為 `data.not-found`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /public/faq/v1/faqs/{faqId}/entries/{entryId}:
+    get:
+      tags:
+        - entry
+      summary: 取得單一問與答
+      description: |
+        需要**所屬問答集**的 `read` ACL 權限。
+      parameters:
+        - $ref: '#/components/parameters/faqId'
+        - $ref: '#/components/parameters/entryId'
+      responses:
+        '200':
+          description: 這一組問與答
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - entry
+                properties:
+                  entry:
+                    $ref: '#/components/schemas/FAQEntry'
+        '403':
+          description: |
+            沒有所屬問答集的 `read` 權限（`reason` 為 `auth.forbidden`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: |
+            問答集或問與答不存在（`reason` 為 `data.not-found`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    put:
+      tags:
+        - entry
+      summary: 更新問與答
+      description: |
+        ⚠️ **這是整體覆寫，不是部分更新。** 沒帶的欄位會被清空——例如只想改 `answer` 卻沒帶 `keywords`，原有的關鍵字就會消失。要保留就把現值一起帶上。
+
+        需要**所屬問答集**的 `edit` ACL 權限。
+      parameters:
+        - $ref: '#/components/parameters/faqId'
+        - $ref: '#/components/parameters/entryId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - entry
+              properties:
+                entry:
+                  $ref: '#/components/schemas/FAQEntryInput'
+      responses:
+        '200':
+          description: 更新成功，回傳空物件
+          content:
+            application/json:
+              schema:
+                type: object
+        '400':
+          description: |
+            `question` 或 `answer` 沒帶、`question` 超過 150 字元，或 `relevantQuestions` 超過 10 個（`reason` 為 `data.validation`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: |
+            沒有所屬問答集的 `edit` 權限（`reason` 為 `auth.forbidden`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: |
+            問答集或問與答不存在（`reason` 為 `data.not-found`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    delete:
+      tags:
+        - entry
+      summary: 刪除問與答
+      description: |
+        刪除一組問與答。無法復原。
+
+        需要**所屬問答集**的 `edit` ACL 權限——注意是 `edit` 而不是 `delete`。`delete` 是刪整個問答集才需要的層級。
+      parameters:
+        - $ref: '#/components/parameters/faqId'
+        - $ref: '#/components/parameters/entryId'
+      responses:
+        '200':
+          description: 刪除成功
+        '403':
+          description: |
+            沒有所屬問答集的 `edit` 權限（`reason` 為 `auth.forbidden`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: |
+            問答集或問與答不存在（`reason` 為 `data.not-found`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+components:
+  schemas:
+    FAQ:
+      type: object
+      description: |
+        一個問答集。**它只是容器**，實際的問與答放在底下的 entry 裡。
+      required:
+        - faqId
+        - name
+        - createdAt
+        - updatedAt
+      properties:
+        faqId:
+          type: string
+          description: |
+            問答集的識別碼。填進 Chat V2 建立對話時的 `params` 就能在對話裡使用這個問答集。
+          example: Ol5dPKnifWCkroZ0UjvvG
+        name:
+          type: string
+          description: |
+            問答集的名稱。
+          example: 客服常見問題
+        description:
+          type: string
+          description: |
+            這個問答集的用途說明。**沒有值時整個欄位不會出現在回應裡。**
+          example: 產品保固、退換貨與運費相關的問答
+        labels:
+          type: array
+          items:
+            type: string
+          description: |
+            自訂標籤，用來分類或篩選。**沒有值時整個欄位不會出現在回應裡。**
+          example:
+            - 客服
+            - 對外
+        createdAt:
+          type: integer
+          format: int64
+          description: |
+            建立時間，Unix 秒數。
+          example: 1719504000
+        updatedAt:
+          type: integer
+          format: int64
+          description: |
+            最後更新時間，Unix 秒數。
+          example: 1719504000
+    Error:
+      type: object
+      description: |
+        所有錯誤回應的共通格式。`reason` 的完整清單與觸發情境見 Common 分頁。
+      required:
+        - service
+        - reason
+        - message
+      properties:
+        service:
+          type: string
+          description: |
+            產生這個錯誤的後端元件名。回報問題時附上它，可以直接定位到是哪個服務出錯——也是判斷 `reason` 屬於哪一組命名空間的依據。
+          example: http-gateway
+        reason:
+          type: string
+          description: |
+            錯誤代碼。**程式請用這個欄位做分支**，不要去解析 `message`。
+          example: data.validation
+        message:
+          type: string
+          description: |
+            人類可讀的錯誤說明。**措辭與內容不保證穩定**，可能隨版本改變，不要拿來做程式判斷。
+          example: invalid request body
+        field:
+          type: string
+          description: |
+            造成錯誤的欄位名，主要由 `data.validation` 帶上。**不是每個錯誤都有**——沒有的時候這個欄位整個不會出現在回應裡。
+          example: convId
+    FAQInput:
+      type: object
+      description: |
+        建立或更新問答集。**這裡不含 entry**——問與答要在 FAQ 建好之後，另外打 entry 的端點加。
+      required:
+        - name
+      properties:
+        name:
+          type: string
+          description: |
+            問答集的名稱，**必填**。
+          example: 客服常見問題
+        description:
+          type: string
+          description: |
+            用途說明。選填。
+          example: 產品保固、退換貨與運費相關的問答
+        labels:
+          type: array
+          items:
+            type: string
+          description: |
+            自訂標籤。選填。
+          example:
+            - 客服
+            - 對外
+    FAQEntry:
+      type: object
+      description: |
+        一組問與答，屬於某個問答集。
+      required:
+        - faqId
+        - entryId
+        - question
+        - answer
+        - createdAt
+        - updatedAt
+      properties:
+        faqId:
+          type: string
+          description: |
+            所屬問答集的識別碼。
+          example: Ol5dPKnifWCkroZ0UjvvG
+        entryId:
+          type: string
+          description: |
+            這筆問答的識別碼。**只在所屬的問答集內唯一。**
+          example: 8K65Qr3rRxyv116m2CP0Z
+        question:
+          type: string
+          description: |
+            問題。
+          example: 產品保固期是多久？
+        answer:
+          type: string
+          description: |
+            答案。
+          example: 一般商品自購買日起保固一年，家電類延長為兩年。保固期內非人為損壞免費維修。
+        category:
+          type: string
+          description: |
+            分類。**沒有值時整個欄位不會出現在回應裡。**
+          example: 保固
+        keywords:
+          type: array
+          items:
+            type: string
+          description: |
+            關鍵字，用來提高檢索命中率。**沒有值時整個欄位不會出現在回應裡。**
+          example:
+            - 保固
+            - 維修
+            - 保固期
+        relevantQuestions:
+          type: array
+          items:
+            type: string
+          description: |
+            同義或相近的問法。使用者用不同說法問同一件事時也能命中這筆。**沒有值時整個欄位不會出現在回應裡。**
+          example:
+            - 保固多久
+            - 產品有保固嗎
+        createdAt:
+          type: integer
+          format: int64
+          description: |
+            建立時間，Unix 秒數。
+          example: 1719504000
+        updatedAt:
+          type: integer
+          format: int64
+          description: |
+            最後更新時間，Unix 秒數。
+          example: 1719504000
+    FAQEntryInput:
+      type: object
+      description: |
+        建立或更新一組問與答。
+      required:
+        - question
+        - answer
+      properties:
+        question:
+          type: string
+          maxLength: 150
+          description: |
+            問題，**必填，最長 150 字元**。超過會回 `400 data.validation`。
+
+            比較長或比較拗口的問法請放到 `relevantQuestions`，這裡留最典型的一句。
+          example: 產品保固期是多久？
+        answer:
+          type: string
+          description: |
+            答案，**必填**。長度沒有上限。
+          example: 一般商品自購買日起保固一年，家電類延長為兩年。保固期內非人為損壞免費維修。
+        category:
+          type: string
+          description: |
+            分類。選填，自由文字，不是 enum。
+          example: 保固
+        keywords:
+          type: array
+          items:
+            type: string
+          description: |
+            關鍵字。選填，數量沒有上限。
+          example:
+            - 保固
+            - 維修
+            - 保固期
+        relevantQuestions:
+          type: array
+          maxItems: 10
+          items:
+            type: string
+          description: |
+            同義或相近的問法，**最多 10 個**。超過會回 `400 data.validation`。
+
+            用來涵蓋同一個問題的不同說法，比塞進 `question` 有效——`question` 有 150 字元上限，而且只留一句最典型的比較好讀。
+          example:
+            - 保固多久
+            - 產品有保固嗎
+            - 保固期限
+  parameters:
+    faqId:
+      in: path
+      name: faqId
+      required: true
+      schema:
+        type: string
+        example: Ol5dPKnifWCkroZ0UjvvG
+      description: |
+        問答集的識別碼，建立 FAQ 時回傳的值。
+    entryId:
+      in: path
+      name: entryId
+      required: true
+      schema:
+        type: string
+        example: 8K65Qr3rRxyv116m2CP0Z
+      description: |
+        問答的識別碼，建立 entry 時回傳的值。**只在所屬的 FAQ 內唯一**，所以路徑上要連 `faqId` 一起帶。
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-Api-Key
+    AccessToken:
+      type: apiKey
+      in: header
+      name: X-Access-Token

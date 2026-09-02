@@ -1,0 +1,364 @@
+openapi: 3.1.0
+info:
+  version: latest
+  title: FedGPT Admin V1 API
+  description: |
+    管理員代管**別人的** API key。本頁三支端點**全部需要 `user.admin` 權限**，一般整合用不到。
+
+    ## 先確認你要的是哪一頁
+
+    ⚠️ **Auth V2 分頁也有一組 `apikeys` 端點，兩者不是同一件事。**
+
+    | 項目 | Auth V2 | Admin V1（本頁） |
+    | --- | --- | --- |
+    | 管誰的 key | 只有**你自己的** | **任何人的** |
+    | 需要什麼 | 登入即可 | `user.admin` 權限 |
+    | 建立時指定對象 | 不能，一定是自己 | `userId` 必填 |
+    | 刪除的範圍 | 只能刪自己的，混到別人的整批拒絕 | 不檢查擁有者，都刪得掉 |
+
+    **要接 API 的整合請走 Auth V2**，那才是你自己拿憑證的地方，端點是 [`POST /public/auth/v2/apikeys`](./?urls.primaryName=Auth+V2#/apikey/post_public_auth_v2_apikeys)。只有「幫別人開／查／收回 key」才需要本頁。
+
+    ## 效期規則與 Auth V2 不同
+
+    | 規則 | 本頁 | [Auth V2](./?urls.primaryName=Auth+V2#/apikey/post_public_auth_v2_apikeys) |
+    | --- | --- | --- |
+    | `expiredAt` 可以不填 | ✅ 不填或 `0` = **永不過期** | ❌ 必填 |
+    | 上限 | 沒有上限 | 最長約一年 |
+    | 過去的時間 | ❌ 拒絕 | ❌ 拒絕 |
+
+    ⚠️ **永不過期的 key 只有本頁建得出來。** 它不會自己失效，只能手動刪除。
+
+    ## 數量上限是共用的
+
+    **每位使用者最多 25 把**，不分是自己建的還是管理員代建的。本頁建立時算的是**目標使用者**的既有數量，不是你的。超過整批不建，回 `400 apikey.quota-exceeded`。
+
+    ## 時間格式
+
+    本頁的 `expiredAt` / `createdAt` 都是 **Unix 秒數**。
+servers:
+  - description: API
+    url: /api
+security:
+  - ApiKeyAuth: []
+  - AccessToken: []
+tags:
+  - name: apikey
+    description: 代管他人的 API key。全部需要 `user.admin` 權限。
+paths:
+  /public/admin/v1/apikeys/{userId}:
+    get:
+      tags:
+        - apikey
+      summary: 列出某位使用者的 API key
+      description: |
+        列出**指定使用者**的 API key，用頁碼分頁。要看自己的請走 [`GET /public/auth/v2/apikeys`](./?urls.primaryName=Auth+V2#/apikey/get_public_auth_v2_apikeys)。
+
+        回傳含完整的 `key` 值。
+
+        建立前想確認對方還剩多少配額，看回傳的 `total`——上限是每人 25 把。
+      parameters:
+        - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/page'
+        - $ref: '#/components/parameters/order'
+        - $ref: '#/components/parameters/userId'
+      responses:
+        '200':
+          description: 該使用者的 API key 清單
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total:
+                    type: integer
+                    description: |
+                      這位使用者的 API key 總數。用來判斷還剩多少配額（上限 25 把）。
+                    example: 3
+                  totalPage:
+                    type: integer
+                    description: |
+                      總頁數。
+                    example: 1
+                  limit:
+                    type: integer
+                    description: |
+                      這一頁的筆數上限，與查詢時帶的相同。
+                    example: 10
+                  page:
+                    type: integer
+                    description: |
+                      目前頁碼。
+                    example: 1
+                  items:
+                    type: array
+                    description: |
+                      這一頁的 API key。
+                    items:
+                      $ref: '#/components/schemas/Apikey'
+        '400':
+          description: |
+            `limit` 或 `page` 超出範圍（`reason` 為 `data.validation`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: |
+            沒有 `user.admin` 權限
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /public/admin/v1/apikeys:
+    post:
+      tags:
+        - apikey
+      summary: 代某位使用者建立 API key
+      description: |
+        一次建立 `number` 把 API key，**全部屬於 `userId` 指定的那位使用者**，不是屬於你。要建自己的請走 [`POST /public/auth/v2/apikeys`](./?urls.primaryName=Auth+V2#/apikey/post_public_auth_v2_apikeys)。
+
+        **完整的 key 值只在這個回應裡出現一次**，請立刻交給對方並妥善保存。之後只能靠 `GET /public/admin/v1/apikeys/{userId}` 再查出來。
+
+        ## `expiredAt` 的規則比 Auth V2 寬
+
+        | 規則 | 本頁（管理員代建） | Auth V2（使用者自建） |
+        | --- | --- | --- |
+        | 可以不填 | ✅ 不填或填 `0` = **永不過期** | ❌ 必填 |
+        | 上限 | **沒有上限**，任何未來時間都可以 | 最長約一年 |
+        | 過去的時間 | ❌ 拒絕 | ❌ 拒絕 |
+
+        ⚠️ **永不過期的 key 只有這裡建得出來。** 它不會自己失效，只能靠 `DELETE .../apikeys:batchDelete` 手動刪除——發出去之前請先想清楚。
+
+        ## 數量上限
+
+        **每位使用者最多 25 把**，與 Auth V2 共用同一個上限。判斷方式是「**目標使用者**既有的數量 ＋ 這次的 `number`」，超過就整批不建，回 `400 apikey.quota-exceeded`。
+
+        要先看對方還剩多少，打 `GET /public/admin/v1/apikeys/{userId}` 看 `total`。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - userId
+                - number
+              properties:
+                userId:
+                  type: string
+                  description: |
+                    這批 key 要給誰。**必填**，不能是空字串。
+                  example: dfd9f610-bd64-4487-af4a-9578550c09b0
+                number:
+                  type: integer
+                  format: uint64
+                  description: |
+                    這次要建幾把。**必填**，且不能是 `0`。
+
+                    「對方既有數量 ＋ 這個值」超過 25 就整批失敗。
+                  example: 1
+                expiredAt:
+                  type: integer
+                  format: uint64
+                  description: |
+                    到期時間，Unix 秒數。**可以不填**——不填或填 `0` 就是永不過期。
+
+                    填了的話不能是過去的時間，但沒有上限。
+                  example: 1751040000
+      responses:
+        '200':
+          description: |
+            建立成功。**`keys` 裡的完整值只出現這一次。**
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  expiredAt:
+                    type: integer
+                    format: uint64
+                    description: |
+                      這批 key 的到期時間，與請求帶的相同。**沒帶的話這裡會是 `0`**，代表永不過期。
+                    example: 1751040000
+                  keys:
+                    type: array
+                    description: |
+                      這次建立的 key，數量等於請求的 `number`。**立刻存起來。**
+                    items:
+                      type: string
+                      example: fk_9Xq2mLvT4bN7cRzA1sD8gH
+        '400':
+          description: |
+            `userId` 或 `number` 沒帶、`expiredAt` 是過去的時間（`reason` 為 `apikey.expiry-invalid`），或超過 25 把上限（`reason` 為 `apikey.quota-exceeded`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: |
+            沒有 `user.admin` 權限
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /public/admin/v1/apikeys:batchDelete:
+    delete:
+      tags:
+        - apikey
+      summary: 批次刪除 API key
+      description: |
+        一次刪除多把 API key。刪掉之後立刻失效，無法復原。
+
+        ⚠️ **這裡可以刪任何人的 key。** 與 [Auth V2 的同名端點](./?urls.primaryName=Auth+V2#/apikey/delete_public_auth_v2_apikeys_batchDelete)不同——那邊會檢查每一把是不是你自己的，這裡不檢查，只要有 `user.admin` 就刪得掉。送出前請確認清單。
+
+        **要輪替 key 的話，先建新的、確認能用，再刪舊的**——避免把正在使用中的憑證刪掉之後接不回去。
+      parameters:
+        - name: keys
+          in: query
+          required: true
+          description: |
+            要刪除的 key，**至少一把**，且每一把都不能是空字串。
+          schema:
+            type: array
+            minItems: 1
+            items:
+              type: string
+              example: fk_9Xq2mLvT4bN7cRzA1sD8gH
+      responses:
+        '200':
+          description: |
+            刪除成功。**回應本身是空物件 `{}`**，不會逐筆回報結果。
+        '400':
+          description: |
+            `keys` 沒帶、是空陣列，或裡面有空字串（`reason` 為 `data.validation`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: |
+            沒有 `user.admin` 權限
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-Api-Key
+    AccessToken:
+      type: apiKey
+      in: header
+      name: X-Access-Token
+  schemas:
+    Apikey:
+      type: object
+      description: |
+        一把 API key。本頁回傳的是**別人的** key——`userId` 是持有者、`creatorId` 是當初建立它的管理員。
+      properties:
+        userId:
+          type: string
+          description: |
+            這把 key 屬於誰，也就是路徑上帶的那個使用者。
+          example: dfd9f610-bd64-4487-af4a-9578550c09b0
+        key:
+          type: string
+          description: |
+            金鑰本身。持有者把它放進請求的 `X-Api-Key` header 使用。
+
+            ⚠️ **這支端點會回傳完整的 key 值**，任何有 `user.admin` 的人都看得到別人的 key。
+          example: fk_9Xq2mLvT4bN7cRzA1sD8gH
+        expiredAt:
+          type: integer
+          format: uint64
+          description: |
+            到期時間，Unix 秒數。**`0` 代表永不過期**——這種 key 只有本頁建得出來。
+
+            過期之後用它呼叫會拿到 `401 auth.invalid-auth`。
+          example: 1751040000
+        createdAt:
+          type: integer
+          format: uint64
+          description: |
+            建立時間，Unix 秒數。
+          example: 1719504000
+        creatorId:
+          type: string
+          description: |
+            建立者的 user ID。**由管理員代建的 key，這個值會與 `userId` 不同**；使用者自己在 Auth V2 分頁建的則兩者相同。
+          example: 7c1e4f92-3ab5-4d18-9f60-2e8b5a4c0d31
+    Error:
+      type: object
+      description: |
+        所有錯誤回應的共通格式。`reason` 的完整清單與觸發情境見 Common 分頁。
+      required:
+        - service
+        - reason
+        - message
+      properties:
+        service:
+          type: string
+          description: |
+            產生這個錯誤的後端元件名。回報問題時附上它，可以直接定位到是哪個服務出錯——也是判斷 `reason` 屬於哪一組命名空間的依據。
+          example: http-gateway
+        reason:
+          type: string
+          description: |
+            錯誤代碼。**程式請用這個欄位做分支**，不要去解析 `message`。
+          example: data.validation
+        message:
+          type: string
+          description: |
+            人類可讀的錯誤說明。**措辭與內容不保證穩定**，可能隨版本改變，不要拿來做程式判斷。
+          example: invalid request body
+        field:
+          type: string
+          description: |
+            造成錯誤的欄位名，主要由 `data.validation` 帶上。**不是每個錯誤都有**——沒有的時候這個欄位整個不會出現在回應裡。
+          example: convId
+  parameters:
+    limit:
+      in: query
+      name: limit
+      schema:
+        type: integer
+        format: uint64
+        default: 10
+        minimum: 1
+        maximum: 100
+        example: 10
+      description: |
+        每頁筆數。不填是 `10`，可填 `1`~`100`，超出範圍會拿到 `400 data.validation`。
+    page:
+      in: query
+      name: page
+      schema:
+        type: integer
+        default: 1
+        minimum: 1
+        example: 1
+      description: |
+        頁碼，**從 1 開始**。不填是 `1`。
+    order:
+      in: query
+      name: order
+      schema:
+        type: string
+        default: '-created_at'
+        enum:
+          - '-created_at'
+          - created_at
+        example: '-created_at'
+      description: |
+        排序方式。`-created_at` 是新的在前（預設），`created_at` 是舊的在前。
+    userId:
+      in: path
+      name: userId
+      required: true
+      schema:
+        type: string
+        example: dfd9f610-bd64-4487-af4a-9578550c09b0
+      description: |
+        要查誰的 API key。

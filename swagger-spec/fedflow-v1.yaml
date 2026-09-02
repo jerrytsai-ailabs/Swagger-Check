@@ -1,0 +1,751 @@
+openapi: 3.1.0
+info:
+  version: latest
+  title: FedGPT FedFlow V1 API
+  description: |
+    對外執行 flow。**執行是非同步的**——送出之後拿到一個 `executionId`，再自行輪詢結果。
+
+    ## 四步流程
+
+    ### 1. 找到 flow
+
+    `GET /public/fedflow/v1/flows/summary`，回傳你有讀取權限的 flow 清單。可用 `name` 做不分大小寫的模糊比對、用 `discoverable` 篩選。
+
+    ### 2. 拿這個 flow 的輸入定義
+
+    `GET /public/fedflow/v1/flows/{flowId}/input-schema`
+
+    ⚠️ **這一步不能跳過。** 每個 flow 的輸入不一樣，回傳的是一份 **JSON Schema（Draft 2020-12）**，描述這個 flow 需要什麼欄位。`execute` **沒有固定的 request 形狀**——照這份 schema 組。
+
+    ### 3. 執行
+
+    `POST /public/fedflow/v1/flows/{flowId}/execute`，回傳 `executionId`。**這時候 flow 才剛開始跑，還沒有結果。**
+
+    ### 4. 輪詢結果
+
+    `GET /public/fedflow/v1/executions/{executionId}/result`
+
+    看回應的 `state`：`INPROGRESS` / `STOPPED` 代表還沒結束（`result` 會是 `null`），`FINISHED` / `ERROR` / `TIMEOUT` / `TERMINATED` 才是終態。
+
+    ## 輸入要放哪個欄位
+
+    `execute` 的 request 有三種載體，**看這個 flow 的 Start 節點是哪一種**（第 2 步的 schema 會告訴你）：
+
+    | 欄位 | 用在 |
+    | --- | --- |
+    | `input` | Start 節點是 chat 輸入——一段文字 |
+    | `formData` | Start 節點是表單輸入——key-value |
+    | `body` | Start 節點宣告了 `payloadSchema` 的結構化輸入 |
+
+    `body` 會被**嚴格驗證**：flow 沒宣告 `payloadSchema` 卻帶了它 → `409 data.conflict`；帶了但不符 schema → `422 data.unprocessable`。
+
+    要附檔案的話用 `assets`，值是 Asset V2 分頁上傳後拿到的 `assetKey`。
+
+    ## 兩條 `flows/summary` 是同一件事
+
+    `/public/fedflow/v1/flows/summary` 與 `/fedflow/v1/flows/summary`（**沒有 `/public` 前綴**）回傳完全相同的內容。無前綴那條是早期整合留下的相容路徑。
+
+    **新接的整合請用帶 `/public` 前綴的那條**，與本站台其他端點一致。
+
+    ## 錯誤代碼跟其他分頁不一樣
+
+    ⚠️ 本頁的後端是 FedFlow，**它有自己的一套 `reason`**，Common 分頁那份清單在這裡不適用。本頁會出現的是 `data.validation`(400)、`flow.validation`(400)、`auth.forbidden`(403)、`data.not-found`(404)、`data.conflict`(409)、`data.unprocessable`(422)。錯誤格式本身仍與其他分頁相同，`service` 欄位會告訴你是誰產生的。
+
+    其中 `flow.validation` 的 `message` **是一段 JSON 字串**而不是給人看的句子——詳見 `execute` 的 `400`。
+servers:
+  - description: API
+    url: /api
+security:
+  - ApiKeyAuth: []
+  - AccessToken: []
+tags:
+  - name: Flow
+    description: 找 flow、拿輸入定義、執行，以及查執行結果。
+paths:
+  /public/fedflow/v1/flows/summary:
+    get:
+      tags:
+        - Flow
+      summary: 列出可用的 flow
+      description: |
+        四步流程的第 1 步：找出你有讀取權限的 flow，拿到它的 `id`。
+
+        **沒有分頁**，符合條件的一次回傳完。回傳的每一筆只有挑選 flow 用得到的欄位，flow 的內容（節點、設定）不在這裡。
+      parameters:
+        - in: query
+          name: name
+          schema:
+            type: string
+            example: 營收
+          description: |
+            依名稱過濾，**不分大小寫的部分比對**（包含即符合，不需要完整名稱）。
+        - in: query
+          name: discoverable
+          schema:
+            type: boolean
+            example: true
+          description: |
+            依 flow 的「可探索」標記過濾——也就是它會不會出現在 chat 的 flow 選單裡。
+
+            ⚠️ **這不等於「可以執行」。** 這個標記與發布狀態是分開的，可能不一致；`discoverable=true` 的 flow 仍可能沒有已發布的版本，執行時會拿到 `404`。
+      responses:
+        '200':
+          description: 你有讀取權限的 flow 清單
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListFlowsSummaryResponse'
+  /fedflow/v1/flows/summary:
+    get:
+      tags:
+        - Flow
+      summary: 列出可用的 flow
+      description: |
+        四步流程的第 1 步：找出你有讀取權限的 flow，拿到它的 `id`。
+
+        **沒有分頁**，符合條件的一次回傳完。回傳的每一筆只有挑選 flow 用得到的欄位，flow 的內容（節點、設定）不在這裡。
+      parameters:
+        - in: query
+          name: name
+          schema:
+            type: string
+            example: 營收
+          description: |
+            依名稱過濾，**不分大小寫的部分比對**（包含即符合，不需要完整名稱）。
+        - in: query
+          name: discoverable
+          schema:
+            type: boolean
+            example: true
+          description: |
+            依 flow 的「可探索」標記過濾——也就是它會不會出現在 chat 的 flow 選單裡。
+
+            ⚠️ **這不等於「可以執行」。** 這個標記與發布狀態是分開的，可能不一致；`discoverable=true` 的 flow 仍可能沒有已發布的版本，執行時會拿到 `404`。
+      responses:
+        '200':
+          description: 你有讀取權限的 flow 清單
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListFlowsSummaryResponse'
+  /public/fedflow/v1/flows/{flowId}/input-schema:
+    get:
+      tags:
+        - Flow
+      summary: 取得 flow 的輸入定義
+      description: |
+        四步流程的第 2 步，**不能跳過**。
+
+        每個 flow 要的輸入都不一樣，`execute` 沒有固定的 request 形狀。這裡回傳一份 **JSON Schema（Draft 2020-12）**，描述這個 flow 需要哪些欄位；照它組出 `execute` 的 request body，並依 Start 節點的型別放進 `input` / `formData` / `body` 其中一個。
+
+        要動態產生表單的話，`inputSchema.x-order` 給的是欄位的建議顯示順序。
+      parameters:
+        - $ref: '#/components/parameters/flowId'
+        - name: origin
+          in: query
+          required: false
+          schema:
+            type: string
+            enum:
+              - job
+            example: job
+          description: |
+            填 `job` 會改拿「排程執行時會用的版本」的 schema，而不是已發布版本的。**一般呼叫不需要帶。**
+
+            只有通過 flow ACL 讀取檢查的呼叫端才生效；靠 flow 的 audience 進來的呼叫端帶了也是拿到已發布版本的 schema，**不會報錯**。填其他值等同沒填。
+      responses:
+        '200':
+          description: 這個 flow 的輸入定義
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InputSchemaResponse'
+        '403':
+          description: |
+            沒有這個 flow 的讀取權限，也不在它的 audience 內（`reason` 為 `auth.forbidden`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: |
+            flow 不存在（`reason` 為 `data.not-found`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /public/fedflow/v1/flows/{flowId}/execute:
+    post:
+      tags:
+        - Flow
+      summary: 執行 flow
+      description: |
+        四步流程的第 3 步。
+
+        ⚠️ **這是非同步的。** 回傳只有一個 `executionId`，**不含執行結果**——flow 這時候才剛開始跑。要拿結果請接著輪詢 `GET /public/fedflow/v1/executions/{executionId}/result`。
+
+        request body 依第 2 步拿到的 input schema 組：chat 輸入放 `input`、表單輸入放 `formData`、宣告了 `payloadSchema` 的結構化輸入放 `body`。
+
+        flow 必須**已經發布**才能執行。只有草稿、沒有已發布版本的 flow 會拿到 `404`。
+      parameters:
+        - $ref: '#/components/parameters/flowId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExecuteFlowRequest'
+      responses:
+        '200':
+          description: |
+            已受理，回傳 `executionId`。**這不代表執行成功**，只代表已經開始跑。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExecuteFlowResponse'
+        '400':
+          description: |
+            `assets` 裡有項目沒帶 `key`、`formData` 不符 input schema（`reason` 為 `data.validation`）；或 flow 本身有擋住執行的設定問題（`reason` 為 `flow.validation`）。
+
+            ⚠️ `flow.validation` 的 `message` **是一段 JSON 字串**，不是給人看的句子，parse 後是 `{ id, type, field, reason }`——`id` 是出問題的節點或連線。其他 `reason` 的 `message` 才是純文字。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: |
+            沒有這個 flow 的讀取權限，也不在它的 audience 內（`reason` 為 `auth.forbidden`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: |
+            flow 不存在，或**沒有已發布的版本**（`reason` 為 `data.not-found`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: |
+            帶了 `body`，但這個 flow 的 Start 節點沒有宣告 `payloadSchema`（`reason` 為 `data.conflict`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: |
+            帶了 `body`，但內容不符 Start 節點宣告的 `payloadSchema`（`reason` 為 `data.unprocessable`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /public/fedflow/v1/executions/{executionId}/result:
+    get:
+      tags:
+        - Flow
+      summary: 查執行結果
+      description: |
+        四步流程的第 4 步。**輪詢這一支直到 `state` 變成終態。**
+
+        回傳的是**終端節點的最終輸出**，中間節點跑了什麼不在這裡。也**不會遞迴進子執行**——子執行要用它自己的 `executionId` 再打一次本端點。
+
+        | `state` | 意思 | `result` |
+        | --- | --- | --- |
+        | `INPROGRESS` | 執行中 | `null` |
+        | `STOPPED` | 停下來等人回應 | `null` |
+        | `FINISHED` | 正常結束 | 有值 |
+        | `ERROR` | 失敗 | 有值，`result.data.error` 說明原因 |
+        | `TIMEOUT` | 逾時 | 有值 |
+        | `TERMINATED` | 被中止 | 有值 |
+
+        ⚠️ **判斷結束與否要看 `state`，不要看 `result` 是不是 `null`。** `state` 已是終態但 `result` 仍為 `null` 是保護性的降級（最後一步的事件還沒寫入），不是失敗。
+      parameters:
+        - $ref: '#/components/parameters/executionId'
+      responses:
+        '200':
+          description: |
+            目前的 `state`，以及終端節點的結果（尚未產生時為 `null`）。
+
+            ⚠️ 下面的樣本列出的是**所有可能出現**的欄位，不是每一筆都會全帶：`result.error` 與 `result.data.error` 只在節點失敗時出現、`result.waitingType` 只在 `STOPPED` 時出現、`result.parentStepId` 與 `result.iterationIndex` 只有在迴圈內執行的步驟才有。實際會拿到哪些，看 `state` 與 `result.status`。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExecutionResultResponse'
+        '403':
+          description: |
+            沒有這次執行的讀取權限（`reason` 為 `auth.forbidden`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: |
+            `executionId` 不存在（`reason` 為 `data.not-found`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+components:
+  schemas:
+    FlowSummaryItem:
+      type: object
+      description: |
+        flow 的精簡資訊，只含挑選 flow 需要的欄位。
+      required:
+        - id
+        - creatorId
+        - creatorName
+        - name
+        - description
+        - createdAt
+        - updatedAt
+      properties:
+        id:
+          type: string
+          description: |
+            flow 的識別碼。**後續三支端點的 `flowId` 就填這個值。**
+          example: Ol5dPKnifWCkroZ0UjvvG
+        creatorId:
+          type: string
+          description: |
+            建立者的 user ID。
+          example: dfd9f610-bd64-4487-af4a-9578550c09b0
+        creatorName:
+          type: string
+          description: |
+            建立者的顯示名稱。帳號已刪除時是 `Unknown`。
+          example: 王小明
+        name:
+          type: string
+          description: |
+            flow 名稱。
+          example: 季度營收分析
+        description:
+          type: string
+          description: |
+            flow 的用途說明。
+          example: 讀取指定季度的營收資料，產出比較與趨勢摘要
+        createdAt:
+          type: integer
+          format: int64
+          description: |
+            建立時間，**Unix 毫秒**。注意本站台其他分頁多數用秒，這一頁是毫秒。
+          example: 1719504000000
+        updatedAt:
+          type: integer
+          format: int64
+          description: |
+            最後更新時間，**Unix 毫秒**。
+          example: 1719504000000
+    ListFlowsSummaryResponse:
+      type: object
+      required:
+        - items
+      properties:
+        items:
+          type: array
+          description: |
+            你有讀取權限的 flow。**沒有分頁**，一次回傳全部。
+          items:
+            $ref: '#/components/schemas/FlowSummaryItem'
+    InputSchemaResponse:
+      type: object
+      required:
+        - inputSchema
+      properties:
+        inputSchema:
+          type: object
+          description: |
+            描述這個 flow 需要什麼輸入的 **JSON Schema（Draft 2020-12）**。照它組出 `execute` 的 request body。
+          properties:
+            $schema:
+              type: string
+              description: |
+                JSON Schema 的版本。
+              example: https://json-schema.org/draft/2020-12/schema
+            type:
+              type: string
+              description: |
+                固定是 `object`。
+              example: object
+            title:
+              type: string
+              description: |
+                這份輸入的標題，可以直接當表單抬頭。
+              example: 季度營收分析
+            description:
+              type: string
+              description: |
+                這份輸入的說明。
+              example: 請選擇要分析的季度與部門
+            properties:
+              type: object
+              additionalProperties: true
+              description: |
+                各個輸入欄位的定義，形狀是標準 JSON Schema。
+              example:
+                季度:
+                  type: string
+                部門:
+                  type: string
+            required:
+              type: array
+              items:
+                type: string
+              description: |
+                必填的欄位名。
+              example:
+                - 季度
+            x-order:
+              type: array
+              items:
+                type: string
+              description: |
+                欄位的建議顯示順序。**`properties` 非空時，根 schema 一定會有這個欄位**——照它排版就對了。
+
+                list 型欄位的 item schema 也可能帶 `x-order`（給它的 `items.properties` 用）。其餘巢狀 schema（檔案項目、動態下拉／複選的選項物件）**不會**有。
+              example:
+                - 季度
+                - 部門
+    Error:
+      type: object
+      description: |
+        所有錯誤回應的共通格式。`reason` 的完整清單與觸發情境見 Common 分頁。
+      required:
+        - service
+        - reason
+        - message
+      properties:
+        service:
+          type: string
+          description: |
+            產生這個錯誤的後端元件名。回報問題時附上它，可以直接定位到是哪個服務出錯——也是判斷 `reason` 屬於哪一組命名空間的依據。
+          example: http-gateway
+        reason:
+          type: string
+          description: |
+            錯誤代碼。**程式請用這個欄位做分支**，不要去解析 `message`。
+          example: data.validation
+        message:
+          type: string
+          description: |
+            人類可讀的錯誤說明。**措辭與內容不保證穩定**，可能隨版本改變，不要拿來做程式判斷。
+          example: invalid request body
+        field:
+          type: string
+          description: |
+            造成錯誤的欄位名，主要由 `data.validation` 帶上。**不是每個錯誤都有**——沒有的時候這個欄位整個不會出現在回應裡。
+          example: convId
+    ExecuteFlowRequest:
+      type: object
+      description: |
+        執行 flow 的輸入。**沒有固定形狀**——先打 `GET /flows/{flowId}/input-schema` 拿這個 flow 的 JSON Schema，再照它組。
+
+        下面三個載體**依 Start 節點的型別擇一使用**：chat 輸入用 `input`、表單輸入用 `formData`、宣告了 `payloadSchema` 的結構化輸入用 `body`。
+      example:
+        input: 請幫我分析上一季的營收變化
+        convId: 3098643a-fd87-4c1b-bc45-c76d8d36a96a
+        assets:
+          - type: image
+            key: tmp/Ol5dPKnifWCkroZ0UjvvG
+      properties:
+        input:
+          type: string
+          description: |
+            一段文字，用在 Start 節點是 **chat 輸入**的 flow。
+          example: 請幫我分析上一季的營收變化
+        formData:
+          type: object
+          additionalProperties: true
+          description: |
+            表單的 key-value，用在 Start 節點是**表單輸入**的 flow。key 對應 input schema 裡 `properties` 的欄位名。
+
+            ```json
+            { "季度": "2024Q2", "部門": "業務一部" }
+            ```
+        body:
+          type: object
+          additionalProperties: true
+          description: |
+            結構化輸入，用在 Start 節點宣告了 `payloadSchema` 的 flow。
+
+            ⚠️ **這個欄位會被嚴格驗證**：flow 沒宣告 `payloadSchema` 卻帶了它 → `409 data.conflict`；帶了但不符 schema → `422 data.unprocessable`。
+
+            通過驗證後，**schema 沒宣告的欄位會被丟掉**（不報錯），flow 裡只讀得到宣告過的那些。
+
+            ```json
+            { "orderId": "A2024-0631", "amount": 128000 }
+            ```
+        convId:
+          type: string
+          description: |
+            對話識別碼。**不填會自動產生。** 想把多次執行歸到同一段對話脈絡時才需要自己指定。
+          example: 3098643a-fd87-4c1b-bc45-c76d8d36a96a
+        assets:
+          type: array
+          description: |
+            要附加的檔案。先走 Asset V2 分頁的上傳流程拿到 `assetKey`，再填進這裡。
+
+            **只需要給 `type` 與 `key`**——FedFlow 會自行把暫存的 key 轉正並補上 URL 與檔名。
+          items:
+            type: object
+            required:
+              - key
+            properties:
+              type:
+                type: string
+                description: |
+                  檔案種類。
+                example: image
+              key:
+                type: string
+                description: |
+                  Asset V2 上傳後拿到的 `assetKey`。
+                example: tmp/Ol5dPKnifWCkroZ0UjvvG
+    ExecuteFlowResponse:
+      type: object
+      description: |
+        ⚠️ **只回傳識別碼，不含結果**——flow 這時候才剛開始跑。要拿結果請輪詢 `GET /public/fedflow/v1/executions/{executionId}/result`。
+      properties:
+        executionId:
+          type: string
+          description: |
+            這次執行的識別碼。
+          example: 8K65Qr3rRxyv116m2CP0Z
+    NodeError:
+      type: object
+      description: |
+        節點執行失敗的細節。**只有 HTTP 節點會帶 `status` / `statusText` / `headers`**，其他節點型別只有 `name` 與 `message`。
+      properties:
+        name:
+          type: string
+          description: |
+            錯誤類型，由節點型別決定：`HTTPError`、`LLMError`、`AgentError`、`ToolError`、`TimeoutError`。
+          example: HTTPError
+        message:
+          type: string
+          description: |
+            錯誤訊息。HTTP 節點的格式是 `HTTP {status}: {statusText}`。
+          example: 'HTTP 502: 502 Bad Gateway'
+        status:
+          type: integer
+          description: |
+            上游回應的 HTTP status code，**只有 HTTP 節點才有**。
+          example: 502
+        statusText:
+          type: string
+          description: |
+            上游回應的 HTTP status 文字，同上。
+          example: 502 Bad Gateway
+        data:
+          description: |
+            附帶的錯誤資料，形狀依節點而異。HTTP 節點放的是上游回應的 body（依 `Content-Type` 解析）。
+          example:
+            detail: upstream timeout
+        headers:
+          type: object
+          additionalProperties: true
+          description: |
+            上游回應的 header，**只有 HTTP 節點才有**。
+          example:
+            content-type: application/json
+    TimeMetadata:
+      type: object
+      description: |
+        節點的執行耗時。**單位是毫秒**（與本頁的時間欄位一致）。
+      properties:
+        start:
+          type: integer
+          description: |
+            開始時間，Unix 毫秒。
+          example: 1719504000000
+        end:
+          type: integer
+          description: |
+            結束時間，Unix 毫秒。
+          example: 1719504003500
+        delta:
+          type: integer
+          description: |
+            耗時，毫秒。等於 `end - start`。
+          example: 3500
+    ExecutionNodeOutput:
+      type: object
+      description: |
+        節點的輸出資料。
+
+        ⚠️ **這支端點會裁掉兩個欄位**：節點的 `input`（上游節點的輸出，在這裡是冗餘的）與 `usageMetadata`（token 用量）。本頁沒有其他端點可以取得它們。
+      properties:
+        output:
+          description: |
+            節點的輸出，形狀依節點型別而異，所以這裡不限制。
+          example:
+            summary: 上一季營收較前季成長 12%
+        content:
+          type: string
+          description: |
+            節點產生的主要文字內容。**多數情況要的就是這個欄位。**
+          example: 上一季營收 1.28 億，較前季成長 12%，主要來自業務一部。
+        state:
+          type: object
+          additionalProperties: true
+          description: |
+            流經這個節點的狀態資料。
+          example:
+            季度: 2024Q2
+        error:
+          $ref: '#/components/schemas/NodeError'
+        branch:
+          type: string
+          description: |
+            這個節點走了哪一條 outgoing edge。固定值有 `success` / `error` / `timeout` / `reject` / `else` / `body` / `complete`，條件節點另外會給自訂的分支名。
+          example: success
+        timeMetadata:
+          $ref: '#/components/schemas/TimeMetadata'
+    ExecutionNodeData:
+      type: object
+      description: |
+        終端節點的執行資料。
+
+        **不含 `childExecutions`**——這支端點不會遞迴進子執行。要看子執行請用它自己的 `executionId` 再打一次本端點。
+      properties:
+        stepId:
+          type: string
+          description: |
+            執行步驟的識別碼，**每一次執行都不同**。同一個 `nodeId` 在一次執行裡可能跑很多次（迴圈、重跑），靠這個值分辨是哪一次；要知道是第幾輪則看 `iterationIndex`。
+          example: 8K65Qr3rRxyv116m2CP0Z
+        nodeId:
+          type: string
+          description: |
+            節點的識別碼。
+          example: agent_0
+        nodeName:
+          type: string
+          description: |
+            節點的顯示名稱。
+          example: 產出摘要
+        nodeType:
+          type: string
+          description: |
+            節點型別，例如 `Agent`、`Start`、`HTTP`。
+          example: Agent
+        status:
+          type: string
+          description: |
+            這個節點的狀態。與整體的 `state` 不同——節點結束不代表整個執行結束。
+          enum:
+            - INPROGRESS
+            - FINISHED
+            - ERROR
+            - STOPPED
+          example: FINISHED
+        data:
+          $ref: '#/components/schemas/ExecutionNodeOutput'
+        parentStepId:
+          type: string
+          description: |
+            這一步所屬迴圈節點本身的 `stepId`。**只有在迴圈內執行的步驟才有。**
+          example: 3xR8pQvNmKtYb2Wc4Ld1E
+        iterationIndex:
+          type: integer
+          description: |
+            這一步是迴圈的第幾輪，**從 0 開始**。只有在迴圈內執行的步驟才有。
+          example: 0
+        error:
+          type: string
+          description: |
+            錯誤訊息，`status` 為 `ERROR` 時才有。**這裡是一段字串**，與 `data.error`（物件）不同。
+          example: upstream request failed
+        waitingType:
+          type: string
+          description: |
+            在等哪一種輸入。**`status` 為 `STOPPED` 時才有**——`FormInput`、`HumanInput`、以及等待工具核准的 `Agent` 節點都會停在這個狀態，光看 `nodeType` 分不出來在等什麼，所以另外給這個欄位。
+          enum:
+            - tool_approval
+            - human_input
+            - form_input
+            - cc_opinion
+            - async_tool
+            - human_correction
+          example: human_input
+    ExecutionResultResponse:
+      type: object
+      description: |
+        `GET /public/fedflow/v1/executions/{executionId}/result` 的回應。**只帶終端節點的最終輸出**，中間節點的過程不在這裡。
+      required:
+        - executionId
+        - taskId
+        - state
+        - result
+      properties:
+        executionId:
+          type: string
+          description: |
+            這次執行的識別碼。
+          example: 8K65Qr3rRxyv116m2CP0Z
+        taskId:
+          type: string
+          description: |
+            給人看的工作編號，回報問題時附上它比較好找。
+          example: T000000229
+        state:
+          type: string
+          description: |
+            目前的執行狀態。**輪詢時看這個欄位判斷要不要繼續等。**
+
+            | 值 | 意思 | `result` |
+            | --- | --- | --- |
+            | `INPROGRESS` | 執行中 | `null` |
+            | `STOPPED` | 停下來等人回應 | `null` |
+            | `FINISHED` | 正常結束 | 有值 |
+            | `ERROR` | 失敗 | 有值，`result.data.error` 會說原因 |
+            | `TIMEOUT` | 逾時 | 同上 |
+            | `TERMINATED` | 被中止 | 同上 |
+          enum:
+            - INPROGRESS
+            - FINISHED
+            - ERROR
+            - TERMINATED
+            - TIMEOUT
+            - STOPPED
+          example: FINISHED
+        result:
+          description: |
+            終端節點的輸出——這次執行裡序號最後的那一步。**欄位一定在，但可能是 `null`**：
+
+            - `state` 是 `INPROGRESS` 或 `STOPPED`（還沒結束）
+            - `state` 已是終態，但最後一步還沒產生事件——**這是保護性的降級，請以 `state` 為準**，不要把 `null` 當成失敗
+
+            所以判斷「有沒有結果」要看 `state`，不是看 `result` 是不是 `null`。
+          oneOf:
+            - $ref: '#/components/schemas/ExecutionNodeData'
+            - type: 'null'
+  parameters:
+    flowId:
+      in: path
+      name: flowId
+      required: true
+      schema:
+        type: string
+        example: Ol5dPKnifWCkroZ0UjvvG
+      description: |
+        flow 的識別碼，從 `GET /public/fedflow/v1/flows/summary` 的 `id` 取得。
+    executionId:
+      in: path
+      name: executionId
+      required: true
+      schema:
+        type: string
+        example: 8K65Qr3rRxyv116m2CP0Z
+      description: |
+        執行的識別碼，`POST .../execute` 回傳的值。
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-Api-Key
+    AccessToken:
+      type: apiKey
+      in: header
+      name: X-Access-Token
