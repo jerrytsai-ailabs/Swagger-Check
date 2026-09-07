@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8" />
+<title>API Review Agent 報告</title>
+<style>
+  body { font-family: -apple-system, "Segoe UI", "Microsoft JhengHei", sans-serif; margin: 24px; color: #1f2328; background: #fff; }
+  h1 { font-size: 20px; }
+  .muted { color: #6b7280; font-size: 12px; }
+  .cards { display: flex; gap: 16px; margin: 16px 0 24px; flex-wrap: wrap; }
+  .card { border: 1px solid #d0d7de; border-radius: 8px; padding: 12px 16px; min-width: 120px; }
+  .card .num { font-size: 24px; font-weight: 700; }
+  table { border-collapse: collapse; width: 100%; margin-bottom: 32px; font-size: 13px; }
+  th, td { border: 1px solid #d0d7de; padding: 6px 10px; text-align: left; vertical-align: top; }
+  th { background: #f6f8fa; }
+  tr.sev-error td.sev { color: #b3261e; font-weight: 700; }
+  tr.sev-warning td.sev { color: #9a6700; font-weight: 700; }
+  tr.sev-info td.sev { color: #57606a; }
+  td.ok { color: #1a7f37; }
+  td.warn { color: #9a6700; }
+  td.err { color: #b3261e; }
+  code { background: #f6f8fa; padding: 1px 4px; border-radius: 4px; }
+</style>
+</head>
+<body>
+<h1>API Review Agent — Public Swagger 靜態檢查報告</h1>
+<p class="muted">來源：https://fedgpt-dev.corp.ailabs.tw/swagger/docs ｜ 產生時間：2026-09-03 10:04:01 +0800</p>
+
+<div class="cards">
+  <div class="card"><div class="num">6</div><div>總發現數</div></div>
+  <div class="card"><div class="num">0</div><div>Error</div></div>
+  <div class="card"><div class="num">6</div><div>Warning</div></div>
+  <div class="card"><div class="num">0</div><div>Info</div></div>
+  <div class="card"><div class="num">6/10</div><div>無發現的分頁</div></div>
+</div>
+
+<h2>各分頁狀態</h2>
+<table>
+<thead><tr><th>分頁</th><th>檔案</th><th>狀態</th></tr></thead>
+<tbody>
+<tr>
+  <td>Common</td>
+  <td><code>0.yaml</code></td>
+  <td class="ok">沒問題</td>
+</tr><tr>
+  <td>SSE 串流</td>
+  <td><code>sse.yaml</code></td>
+  <td class="ok">沒問題</td>
+</tr><tr>
+  <td>Admin V1</td>
+  <td><code>admin-v1.yaml</code></td>
+  <td class="ok">沒問題</td>
+</tr><tr>
+  <td>Asset V2</td>
+  <td><code>asset-v2.yaml</code></td>
+  <td class="ok">沒問題</td>
+</tr><tr>
+  <td>Asura V1</td>
+  <td><code>asura-v1.yaml</code></td>
+  <td class="ok">沒問題</td>
+</tr><tr>
+  <td>Auth V2</td>
+  <td><code>auth-v2.yaml</code></td>
+  <td class="ok">沒問題</td>
+</tr><tr>
+  <td>Chat V2</td>
+  <td><code>chat-v2.yaml</code></td>
+  <td class="warn">1 個發現</td>
+</tr><tr>
+  <td>FAQ V1</td>
+  <td><code>faq-v1.yaml</code></td>
+  <td class="warn">2 個發現</td>
+</tr><tr>
+  <td>FedFlow V1</td>
+  <td><code>fedflow-v1.yaml</code></td>
+  <td class="ok">沒問題</td>
+</tr><tr>
+  <td>Helix V1</td>
+  <td><code>helix-v1.yaml</code></td>
+  <td class="ok">沒問題</td>
+</tr><tr>
+  <td>Knowledge V3</td>
+  <td><code>knowledge-v3.yaml</code></td>
+  <td class="warn">2 個發現</td>
+</tr><tr>
+  <td>LLM V1</td>
+  <td><code>llm-v1.yaml</code></td>
+  <td class="warn">1 個發現</td>
+</tr>
+</tbody>
+</table>
+
+<h2>詳細發現（6 筆，Error 優先）</h2>
+<table>
+<thead><tr><th>嚴重度</th><th>分頁</th><th>Endpoint</th><th>規則</th><th>位置</th><th>訊息</th></tr></thead>
+<tbody>
+<tr class="sev-warning">
+  <td class="sev">Warning</td>
+  <td>Chat V2<br/><span class="muted">chat-v2.yaml</span></td>
+  <td>POST /public/chat/v2/conversations</td>
+  <td>missing_property_description</td>
+  <td>responses.200.conversation</td>
+  <td>欄位 `conversation` 沒有 description</td>
+</tr><tr class="sev-warning">
+  <td class="sev">Warning</td>
+  <td>FAQ V1<br/><span class="muted">faq-v1.yaml</span></td>
+  <td>POST /public/faq/v1/faqs</td>
+  <td>missing_property_description</td>
+  <td>responses.200.faq</td>
+  <td>欄位 `faq` 沒有 description</td>
+</tr><tr class="sev-warning">
+  <td class="sev">Warning</td>
+  <td>FAQ V1<br/><span class="muted">faq-v1.yaml</span></td>
+  <td>POST /public/faq/v1/faqs/{faqId}/entries</td>
+  <td>missing_property_description</td>
+  <td>responses.200.entry</td>
+  <td>欄位 `entry` 沒有 description</td>
+</tr><tr class="sev-warning">
+  <td class="sev">Warning</td>
+  <td>Knowledge V3<br/><span class="muted">knowledge-v3.yaml</span></td>
+  <td>POST /public/knowledge/v3/knowledges</td>
+  <td>missing_property_description</td>
+  <td>responses.200.knowledge</td>
+  <td>欄位 `knowledge` 沒有 description</td>
+</tr><tr class="sev-warning">
+  <td class="sev">Warning</td>
+  <td>Knowledge V3<br/><span class="muted">knowledge-v3.yaml</span></td>
+  <td>POST /public/knowledge/v3/knowledges/{knowledgeId}/documents</td>
+  <td>missing_property_description</td>
+  <td>responses.200.document</td>
+  <td>欄位 `document` 沒有 description</td>
+</tr><tr class="sev-warning">
+  <td class="sev">Warning</td>
+  <td>LLM V1<br/><span class="muted">llm-v1.yaml</span></td>
+  <td>-</td>
+  <td>missing_property_description</td>
+  <td>components.schemas.UpstreamError.error</td>
+  <td>欄位 `error` 沒有 description</td>
+</tr>
+</tbody>
+</table>
+
+<p class="muted">本報告僅涵蓋第一階段「靜態比對 Swagger 定義本身」，不代表已驗證實際 API 行為（live call、向下相容尚未涵蓋）。</p>
+</body>
+</html>

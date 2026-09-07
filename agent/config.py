@@ -1,0 +1,32 @@
+import os
+
+DEFAULT_BASE_URL = "https://fedgpt-dev.corp.ailabs.tw/swagger/docs"
+
+# (group name, filename, is_real_endpoints)
+# Common / SSE 是說明用分頁，本身沒有要檢查的真實 endpoint，僅用來取共用的 Error schema 等定義。
+SPEC_FILES = [
+    ("Common", "0.yaml", False),
+    ("SSE 串流", "sse.yaml", False),
+    ("Admin V1", "admin-v1.yaml", True),
+    ("Asset V2", "asset-v2.yaml", True),
+    ("Asura V1", "asura-v1.yaml", True),
+    ("Auth V2", "auth-v2.yaml", True),
+    ("Chat V2", "chat-v2.yaml", True),
+    ("FAQ V1", "faq-v1.yaml", True),
+    ("FedFlow V1", "fedflow-v1.yaml", True),
+    ("Helix V1", "helix-v1.yaml", True),
+    ("Knowledge V3", "knowledge-v3.yaml", True),
+    ("LLM V1", "llm-v1.yaml", True),
+]
+
+HTTP_METHODS = {"get", "post", "put", "patch", "delete", "options", "head"}
+
+# 允許不帶 /public/ 前綴、但已知是刻意保留的相容路徑（file, path）。
+# 目前只發現 fedflow-v1.yaml 這一條，spec 內文有明講原因。新增例外前請先確認 description 有沒有講清楚。
+KNOWN_NON_PUBLIC_EXCEPTIONS = {
+    ("fedflow-v1.yaml", "/fedflow/v1/flows/summary"),
+}
+
+GOOGLE_CHAT_WEBHOOK_URL = os.environ.get("GOOGLE_CHAT_WEBHOOK_URL", "")
+
+REQUEST_TIMEOUT_SECONDS = 20
