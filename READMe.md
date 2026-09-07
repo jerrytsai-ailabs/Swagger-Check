@@ -57,6 +57,10 @@ Agent 的輸入方式：直接對這 12 個 URL 發 HTTP GET 抓 YAML，不需�
 
 > 待釐清：Jira 開票的專案/issue type/欄位規則、報告內容的具體欄位與呈現方式，需要在正式設計文件中細化。
 
+### 2.4 設計原則：Agent 只標缺漏，不代寫內容
+
+Agent 能檢查出「這裡沒寫 description」，但**不負責猜測正確的內容應該是什麼**——尤其牽涉到實際行為的情況（例如某個回應欄位到底包含哪些子欄位），只有懂實作的人確認過才能寫，Agent 亂猜反而可能寫出錯誤文件。Agent 的角色是標出缺口、附上足夠的上下文（哪支 endpoint、哪個欄位、旁邊有沒有類似寫得好的欄位可以參考），由人補上正確內容。實際案例見第 3 節。
+
 ---
 
 ## 3. 檢查規則 vs. 驗收標準
@@ -74,6 +78,21 @@ Agent 的輸入方式：直接對這 12 個 URL 發 HTTP GET 抓 YAML，不需�
 > 待釐清：需要與 James Yang review 確認，哪些規則第一階段就能做到「純靜態比對」、哪些其實仍需要 live call 才能驗證。
 
 **補充發現**：實測發現幾乎所有端點都遵循 `/public/{service}/v{n}/...` 的命名慣例，這可以當作「這支算不算 public」的判斷依據之一。但也發現一個例外：`fedflow-v1.yaml` 同時有 `/public/fedflow/v1/flows/summary` 與不帶 `/public/` 前綴的 `/fedflow/v1/flows/summary`，經確認這是**刻意保留的相容路徑**，description 裡有明講「無前綴那條是早期整合留下的相容路徑，新接的整合請用帶 `/public` 前綴的那條」。這代表檢查規則不能只看「有沒有 `/public/` 前綴」，還要能分辨「有註明原因的例外」跟「真的漏標／漏寫」，避免誤判。
+
+### 3.1 案例：description 缺漏的實際影響
+
+實測跑雛形 Agent 對 `chat-v2.yaml` 抓到的一筆真實發現，可以具體說明「key / endpoint 描述是否正確」這條驗收標準在抓什麼。
+
+**有寫（`GET /public/chat/v2/conversations/{convId}` 的回應）**：`conversation` 欄位 `$ref` 到共用的 `Conversation` schema，裡面每個子欄位都有 description、example、必填清單，SI 開發者不用問人就知道每個欄位的意思與限制。
+
+**沒寫（`POST /public/chat/v2/conversations`，建立對話的回應）**：同樣叫 `conversation` 的欄位，卻是 inline 定義、只保證有 `convId`，本身沒有 description。可能會產生三個疑問：這個 `conversation` 跟 GET 回的是不是同一種東西？除了 `convId` 是不是其實還有別的欄位只是沒寫？這是不是文件漏寫的 bug？
+
+**這裡的重點**：Agent 只能標出「這欄位沒有 description」，**沒辦法自己決定該補什麼內容**——因為正確答案取決於後端實際回傳什麼，必須先請熟悉這支 API 的工程師確認實際行為（或找一組帳號實測一次），才能決定是要：
+
+- (a) 改成跟 GET 一樣 `$ref` 到 `Conversation`（如果其實回的就是完整物件）or 
+- (b) 保留精簡結構、但補上 description 說明「這是精簡版，只保證有 convId，要完整資訊請改打 GET」（如果本來就設計成只回最小資訊）。
+
+這也是第 2.4 節「Agent 只標缺漏、不代寫內容」原則的具體案例。
 
 ---
 
@@ -109,7 +128,8 @@ Agent 的輸入方式：直接對這 12 個 URL 發 HTTP GET 抓 YAML，不需�
 
 ## 待確認 / Open Questions
 
-1. ~~Public Swagger 頁面的具體連結與格式~~ — 已確認：<https://fedgpt-dev.corp.ailabs.tw/swagger/>，OpenAPI 3.1.0 YAML，共 12 份可直接 HTTP GET 下載。**新待確認**：dev 環境（`version: latest`）是否等同 Nina 要的「Public Swagger」本人？跟正式環境對外曝露的版本是否有落差、要不要改盯正式環境。
+1. 已確認：<https://fedgpt-dev.corp.ailabs.tw/swagger/>，OpenAPI 3.1.0 YAML，共 12 份可直接 HTTP GET 下載。
+**新待確認**：dev 環境（`version: latest`）是否等同 Nina 要的「Public Swagger」本人？跟正式環境對外曝露的版本是否有落差、要不要改盯正式環境。
 2. 3.10 版本 Swagger 何時可以取得（連結、環境同上待確認）。
 3. Jira 開票的目標 project、issue type、必填欄位規則。
 4. HTML report 的呈現內容與對象（給 PJM 看？給開發看？）。
@@ -120,7 +140,6 @@ Agent 的輸入方式：直接對這 12 個 URL 發 HTTP GET 抓 YAML，不需�
 
 ## 下一步
 
-1. 依此草稿確認 Jerry 提供的 Public Swagger 連結，實際看一次規格內容。
-2. 補齊第 3 節「檢查規則」的細節定義（哪些規則第一階段可行）。
-3. 找 **James Yang** discuss & review，cc Jessica Kao、Winter Deng。
-4. Review 後正式謄寫為 Confluence 頁面，回填 ticket [FEDGPT-15990](https://ailabstw.atlassian.net/browse/FEDGPT-15990)。
+1. 補齊第 3 節「檢查規則」的細節定義（哪些規則第一階段可行）。
+2. 找 **James Yang** discuss & review，cc Jessica Kao、Winter Deng。
+3. Review 後正式謄寫為 Confluence 頁面，回填 ticket [FEDGPT-15990](https://ailabstw.atlassian.net/browse/FEDGPT-15990)。
