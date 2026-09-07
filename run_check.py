@@ -7,6 +7,7 @@
     python run_check.py --local swagger-spec
     python run_check.py --notify
     python run_check.py --base-url https://fedgpt-stg2-vm1.corp.ailabs.tw/swagger/docs
+    python run_check.py --live              # 靜態比對 + 對 GET endpoint 做 live call（需要 FEDGPT_ACCESS_TOKEN）
 """
 
 import argparse
@@ -16,18 +17,22 @@ from datetime import datetime
 
 from agent.checks import run_all_checks
 from agent.chat_notify import build_chat_message, post_to_google_chat
-from agent.config import DEFAULT_BASE_URL, GOOGLE_CHAT_WEBHOOK_URL
+from agent.config import DEFAULT_BASE_URL, FEDGPT_ACCESS_TOKEN, GOOGLE_CHAT_WEBHOOK_URL, derive_api_base_url
 from agent.fetch import fetch_specs, load_local_specs
+from agent.live_call import run_live_get_checks
 from agent.report import render_html
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Public Swagger 靜態檢查")
+    parser = argparse.ArgumentParser(description="Public Swagger 靜態檢查 / live call")
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help="Swagger docs 目錄的 base URL")
     parser.add_argument("--local", metavar="DIR", help="不對外抓取，改用本機資料夾裡的 YAML（離線測試用）")
     parser.add_argument("--output-dir", default="reports", help="HTML report 輸出資料夾")
     parser.add_argument("--notify", action="store_true", help="把摘要推到 Google Chat")
     parser.add_argument("--webhook-url", default=GOOGLE_CHAT_WEBHOOK_URL, help="覆寫 GOOGLE_CHAT_WEBHOOK_URL")
+    parser.add_argument("--live", action="store_true", help="額外對 GET endpoint 做 live call（只讀，不含 POST/PUT/DELETE）")
+    parser.add_argument("--api-base-url", default=None, help="覆寫 live call 要打的 API origin（預設從 --base-url 推導）")
+    parser.add_argument("--token", default=FEDGPT_ACCESS_TOKEN, help="覆寫 FEDGPT_ACCESS_TOKEN（live call 用）")
     args = parser.parse_args()
 
     if args.local:
@@ -46,6 +51,13 @@ def main():
     print("執行靜態檢查規則 ...")
     findings = run_all_checks(entries)
     print(f"共 {len(findings)} 筆發現")
+
+    if args.live:
+        api_base_url = args.api_base_url or derive_api_base_url(args.base_url)
+        print(f"執行 live call（GET only）against {api_base_url} ...")
+        live_findings = run_live_get_checks(entries, api_base_url, args.token)
+        print(f"live call 共 {len(live_findings)} 筆發現")
+        findings.extend(live_findings)
 
     os.makedirs(args.output_dir, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")

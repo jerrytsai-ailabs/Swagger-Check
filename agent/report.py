@@ -25,12 +25,7 @@ def build_summary(findings, entries):
     }
 
 
-def render_html(findings, entries, base_url):
-    summary = build_summary(findings, entries)
-    findings_sorted = sorted(
-        findings, key=lambda f: (_SEVERITY_ORDER.get(f["severity"], 9), f["file"], f["path"] or "")
-    )
-
+def _render_findings_table(findings_sorted):
     rows = []
     for f in findings_sorted:
         endpoint = f"{f['method']} {f['path']}" if f["path"] else "-"
@@ -44,6 +39,22 @@ def render_html(findings, entries, base_url):
   <td>{_esc(f['message'])}</td>
 </tr>"""
         )
+    return f"""<table>
+<thead><tr><th>嚴重度</th><th>分頁</th><th>Endpoint</th><th>規則</th><th>位置</th><th>訊息</th></tr></thead>
+<tbody>
+{''.join(rows) if rows else '<tr><td colspan="6">沒有發現任何問題 🎉</td></tr>'}
+</tbody>
+</table>"""
+
+
+def render_html(findings, entries, base_url):
+    summary = build_summary(findings, entries)
+    findings_sorted = sorted(
+        findings, key=lambda f: (_SEVERITY_ORDER.get(f["severity"], 9), f["file"], f["path"] or "")
+    )
+    static_findings = [f for f in findings_sorted if f.get("phase", "static") == "static"]
+    live_findings = [f for f in findings_sorted if f.get("phase") == "live"]
+    has_live = any(f.get("phase") == "live" for f in findings)
 
     file_rows = []
     for e in entries:
@@ -102,15 +113,16 @@ def render_html(findings, entries, base_url):
 </tbody>
 </table>
 
-<h2>詳細發現（{len(findings_sorted)} 筆，Error 優先）</h2>
-<table>
-<thead><tr><th>嚴重度</th><th>分頁</th><th>Endpoint</th><th>規則</th><th>位置</th><th>訊息</th></tr></thead>
-<tbody>
-{''.join(rows) if rows else '<tr><td colspan="6">沒有發現任何問題 🎉</td></tr>'}
-</tbody>
-</table>
+<h2>靜態比對發現（{len(static_findings)} 筆，Error 優先）</h2>
+{_render_findings_table(static_findings)}
 
-<p class="muted">本報告僅涵蓋第一階段「靜態比對 Swagger 定義本身」，不代表已驗證實際 API 行為（live call、向下相容尚未涵蓋）。</p>
+{f'''<h2>Live call 發現（{len(live_findings)} 筆，Error 優先）</h2>
+{_render_findings_table(live_findings)}''' if has_live else ''}
+
+<p class="muted">
+靜態比對涵蓋 Swagger 定義本身是否完整、一致。
+{"Live call 目前只打 GET，且只檢查「狀態碼有沒有在 spec 裡宣告過」與「回應內容符不符合宣告的 schema」，不含 POST/PUT/DELETE、不含向下相容。" if has_live else "本輪未執行 live call（只做了靜態比對）。"}
+</p>
 </body>
 </html>
 """

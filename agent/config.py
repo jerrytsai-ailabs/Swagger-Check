@@ -1,5 +1,9 @@
 import os
 
+from dotenv import load_dotenv
+
+load_dotenv()  # 從專案根目錄的 .env 讀取本機密鑰（.env 不進 git，見 .gitignore）
+
 DEFAULT_BASE_URL = "https://fedgpt-dev.corp.ailabs.tw/swagger/docs"
 
 # (group name, filename, is_real_endpoints)
@@ -30,3 +34,16 @@ KNOWN_NON_PUBLIC_EXCEPTIONS = {
 GOOGLE_CHAT_WEBHOOK_URL = os.environ.get("GOOGLE_CHAT_WEBHOOK_URL", "")
 
 REQUEST_TIMEOUT_SECONDS = 20
+
+# --- Live call（第二階段，目前只做 GET）---
+FEDGPT_ACCESS_TOKEN = os.environ.get("FEDGPT_ACCESS_TOKEN", "")
+
+
+def derive_api_base_url(swagger_docs_base_url):
+    """從 swagger docs 的 base URL 推回實際打 API 要用的 origin + /api。
+
+    例：https://fedgpt-dev.corp.ailabs.tw/swagger/docs -> https://fedgpt-dev.corp.ailabs.tw/api
+    （對應每份 spec 裡 servers[0].url: /api 這個相對路徑）
+    """
+    origin = swagger_docs_base_url.split("/swagger/")[0]
+    return origin.rstrip("/") + "/api"
