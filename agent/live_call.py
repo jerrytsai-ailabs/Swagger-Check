@@ -21,7 +21,7 @@ from jsonschema import Draft202012Validator
 from .checks import _resolve_ref  # 沿用同一套本地 $ref 解析邏輯
 from .config import HTTP_METHODS, REQUEST_TIMEOUT_SECONDS
 
-MAX_DEREF_DEPTH = 10
+MAX_DEREF_DEPTH = 60  # 真實案例（chat-v2 的訊息／flow 節點狀態）巢狀很深，10 層不夠會留下沒展開的 $ref 讓 jsonschema 炸掉
 
 
 def _finding(rule, severity, file, group, message, path=None, method=None, location=""):
@@ -46,9 +46,16 @@ def _resolve_param(param, spec):
 
 
 def _deref_schema(schema, spec, seen=None, depth=0):
-    """回傳把本地 $ref 展開後的 schema 深拷貝，供 jsonschema 驗證用。"""
-    if depth > MAX_DEREF_DEPTH or not isinstance(schema, dict):
+    """回傳把本地 $ref 展開後的 schema 深拷貝，供 jsonschema 驗證用。
+
+    深度保護只是防呆用的最後防線（真正防無限遞迴的是下面的 `seen`），所以超過深度上限時
+    回傳空 schema（永遠驗證通過）而不是原始內容——絕對不能讓還沒展開的 $ref 流出這個函式，
+    不然 jsonschema 會試著自己去解析那個 $ref，但我們沒有給它完整的 spec context，會直接炸掉。
+    """
+    if not isinstance(schema, dict):
         return schema
+    if depth > MAX_DEREF_DEPTH:
+        return {}
     seen = seen or set()
 
     if "$ref" in schema:
