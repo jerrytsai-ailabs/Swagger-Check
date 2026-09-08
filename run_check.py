@@ -8,6 +8,7 @@
     python run_check.py --notify
     python run_check.py --base-url https://fedgpt-stg2-vm1.corp.ailabs.tw/swagger/docs
     python run_check.py --live              # 靜態比對 + 對 GET endpoint 做 live call（需要 FEDGPT_ACCESS_TOKEN）
+    python run_check.py --no-diff           # 不跟上次執行的結果比對（預設會比對）
 """
 
 import argparse
@@ -21,10 +22,11 @@ from agent.config import DEFAULT_BASE_URL, FEDGPT_ACCESS_TOKEN, GOOGLE_CHAT_WEBH
 from agent.fetch import fetch_specs, load_local_specs
 from agent.live_call import run_live_get_checks
 from agent.report import render_html
+from agent.spec_diff import SNAPSHOT_DIR_DEFAULT, run_spec_diff
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Public Swagger 靜態檢查 / live call")
+    parser = argparse.ArgumentParser(description="Public Swagger 靜態檢查 / live call / 版本間差異")
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help="Swagger docs 目錄的 base URL")
     parser.add_argument("--local", metavar="DIR", help="不對外抓取，改用本機資料夾裡的 YAML（離線測試用）")
     parser.add_argument("--output-dir", default="reports", help="HTML report 輸出資料夾")
@@ -33,6 +35,8 @@ def main():
     parser.add_argument("--live", action="store_true", help="額外對 GET endpoint 做 live call（只讀，不含 POST/PUT/DELETE）")
     parser.add_argument("--api-base-url", default=None, help="覆寫 live call 要打的 API origin（預設從 --base-url 推導）")
     parser.add_argument("--token", default=FEDGPT_ACCESS_TOKEN, help="覆寫 FEDGPT_ACCESS_TOKEN（live call 用）")
+    parser.add_argument("--no-diff", action="store_true", help="不跟上次執行存的基準比對 spec 差異")
+    parser.add_argument("--snapshot-dir", default=SNAPSHOT_DIR_DEFAULT, help="spec 基準快照存放資料夾")
     args = parser.parse_args()
 
     if args.local:
@@ -58,6 +62,12 @@ def main():
         live_findings = run_live_get_checks(entries, api_base_url, args.token)
         print(f"live call 共 {len(live_findings)} 筆發現")
         findings.extend(live_findings)
+
+    if not args.no_diff:
+        print(f"跟上次執行的基準比對 spec 差異（{args.snapshot_dir}）...")
+        diff_findings = run_spec_diff(entries, args.snapshot_dir)
+        print(f"spec diff 共 {len(diff_findings)} 筆發現")
+        findings.extend(diff_findings)
 
     os.makedirs(args.output_dir, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")

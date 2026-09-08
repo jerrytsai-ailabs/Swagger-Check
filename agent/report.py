@@ -54,7 +54,9 @@ def render_html(findings, entries, base_url):
     )
     static_findings = [f for f in findings_sorted if f.get("phase", "static") == "static"]
     live_findings = [f for f in findings_sorted if f.get("phase") == "live"]
+    diff_findings = [f for f in findings_sorted if f.get("phase") == "diff"]
     has_live = any(f.get("phase") == "live" for f in findings)
+    has_diff = any(f.get("phase") == "diff" for f in findings)
 
     file_rows = []
     for e in entries:
@@ -119,9 +121,13 @@ def render_html(findings, entries, base_url):
 {f'''<h2>Live call 發現（{len(live_findings)} 筆，Error 優先）</h2>
 {_render_findings_table(live_findings)}''' if has_live else ''}
 
+{f'''<h2>與上次執行的差異（{len(diff_findings)} 筆）</h2>
+{_render_findings_table(diff_findings)}''' if has_diff else ''}
+
 <p class="muted">
 靜態比對涵蓋 Swagger 定義本身是否完整、一致。
-{"Live call 目前只打 GET，且只檢查「狀態碼有沒有在 spec 裡宣告過」與「回應內容符不符合宣告的 schema」，不含 POST/PUT/DELETE、不含向下相容。" if has_live else "本輪未執行 live call（只做了靜態比對）。"}
+{"Live call 目前只打 GET，且只檢查「狀態碼有沒有在 spec 裡宣告過」與「回應內容符不符合宣告的 schema」，不含 POST/PUT/DELETE。" if has_live else "本輪未執行 live call（只做了靜態比對）。"}
+{"「與上次執行的差異」比對的是這次抓到的 spec 跟上一次執行存的基準，不是跟 3.10 版本比（目前拿不到 3.10）。" if has_diff else ""}
 </p>
 </body>
 </html>
