@@ -207,6 +207,7 @@ def _walk_schema(node, spec, file, group, path, method, breadcrumb, findings, de
                             location=prop_breadcrumb,
                         )
                     )
+                _check_missing_example(resolved_prop, file, group, path, method, prop_breadcrumb, findings)
                 _check_example_type(resolved_prop, file, group, path, method, prop_breadcrumb, findings)
             _walk_schema(prop_schema, spec, file, group, path, method, prop_breadcrumb, findings, depth + 1, seen_refs)
 
@@ -216,6 +217,34 @@ def _walk_schema(node, spec, file, group, path, method, breadcrumb, findings, de
     for combinator in ("allOf", "oneOf", "anyOf"):
         for sub in node.get(combinator) or []:
             _walk_schema(sub, spec, file, group, path, method, breadcrumb, findings, depth + 1, seen_refs)
+
+
+_SCALAR_TYPES = {"string", "integer", "number", "boolean"}
+
+
+def _check_missing_example(schema, file, group, path, method, breadcrumb, findings):
+    """跟 PM 討論後新增的規則：純量欄位沒有 example 也要標出來（例如 contentType 這類欄位）。
+
+    一開始以為有 enum 的欄位可以跳過（合法值都列出來了，感覺不需要再給 example），
+    但實測對到 PM 講的具體案例（asura-v1.yaml 的 contentType，有 enum 但沒 example）才發現
+    enum 列的是「合法值有哪些」，example 給的是「示範怎麼填」，兩者用途不同——enum 不能取代 example。
+    """
+    declared_type = schema.get("type")
+    if not isinstance(declared_type, str) or declared_type not in _SCALAR_TYPES:
+        return  # OpenAPI 3.1 允許 type 是 list（如 ["string","null"]）；先不判斷型別聯集，避免誤判
+    if "example" not in schema:
+        findings.append(
+            _finding(
+                "missing_example",
+                "warning",
+                file,
+                group,
+                "這個欄位沒有 example",
+                path=path,
+                method=method,
+                location=breadcrumb,
+            )
+        )
 
 
 def _check_example_type(schema, file, group, path, method, breadcrumb, findings):

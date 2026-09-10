@@ -19,6 +19,13 @@
 - **本階段範圍**：**功能正確性檢查為主，壓力/效能測試不在範疇內。**
 - **輸入來源**：Public Swagger 頁面 — <https://fedgpt-dev.corp.ailabs.tw/swagger/>（dev 環境，`info.version: latest`，跟得上最新開發進度）。
 
+### 1.1 跟 PM 討論後的結論
+
+- **假設讀者看得懂 API**：文件不用解釋「什麼是 API」這種基本概念，重點放在這支 API 特有的行為、限制、格式規則。
+- **正確性優先於可讀性**：寫得漂亮但內容錯，比寫得普通但內容對還糟——規則的嚴重度分級要反映這個順序（結構性錯誤如必填/型別不對 > 純文字缺漏如沒寫 description）。
+- **驗收方式＝照手冊上的方式去呼叫 API，看能不能通**：不是憑空猜測 API 行為，而是照 Swagger 文件寫的步驟真的打一次，跟 live call 的設計方向一致。
+- **有對外的 API 都要檢查，一支都不能少**：涵蓋現有 12 份 spec 裡所有真實端點；且檢查方法本身也要全面，不能只做讀取類——**live call 要從目前的 GET only 擴大到 POST/PUT/DELETE**（見第 7 節）。
+
 ---
 
 ## 2. Agent 設計
@@ -70,7 +77,7 @@ Agent 能檢查出「這裡沒寫 description」，但**不負責猜測正確的
 | 原始驗收標準 | Agent 靜態檢查規則（第一階段） |
 |---|---|
 | key 必填與否 | 比對 Swagger 中 `required` 欄位定義是否與實際規格一致（本階段先確認 Swagger 定義本身無矛盾/缺漏，非 live 驗證） |
-| key / endpoint 描述是否正確（範圍、範例） | 檢查每個 key、endpoint 是否都有 description，是否有標明合理範圍與範例值 |
+| key / endpoint 描述是否正確（範圍、範例） | 檢查每個 key、endpoint 是否都有 description；**新增規則**：純量欄位（string/integer/number/boolean）沒有 `example` 也要標出來——跟 PM 討論時發現的具體缺口是 `contentType` 這類欄位缺 example，之後同類欄位都要抓 |
 | Swagger 上列出的 endpoint 都要存在 | 本階段先確認 Swagger 定義完整、無明顯缺漏/重複（實際 endpoint 是否存在待 live call 階段驗證） |
 | 狀態碼 | 檢查 Swagger 是否有定義完整的回應狀態碼（實際狀態碼是否正確待 live call 階段驗證） |
 | API 向下相容（自 3.10 起） | **改為「這次執行 vs. 上次執行」的 spec diff**（見下方 3.2 節）——3.10 版本大概率拿不到，放棄以它為 baseline，改成每次執行都跟上一次存的快照比對，抓破壞性變更 |
@@ -93,6 +100,10 @@ Agent 能檢查出「這裡沒寫 description」，但**不負責猜測正確的
 - (b) 保留精簡結構、但補上 description 說明「這是精簡版，只保證有 convId，要完整資訊請改打 GET」（如果本來就設計成只回最小資訊）。
 
 這也是第 2.4 節「Agent 只標缺漏、不代寫內容」原則的具體案例。
+
+### 3.1.1 新規則：純量欄位缺 example
+
+已實作並測試（`agent/checks.py` 的 `_check_missing_example`）。原本以為「有 `enum` 的欄位可以跳過，合法值都列出來了」，但拿 `asura-v1.yaml` 的 `contentType`（有 `enum`、一開始以為沒有 example）去對，才發現這個假設是錯的——`enum` 列的是「合法值有哪些」，`example` 給的是「示範怎麼填」，兩者用途不同，enum 不能取代 example，所以拿掉了這個例外。用單元測試確認邏輯正確（有 example 的不報、沒有的會報）。目前對 dev 環境的即時 spec 跑一輪是 0 筆——這份 spec 剛好在這點上是乾淨的，規則本身留著當之後的防護網。
 
 ### 3.2 向下相容改法：跟上次執行比對，不等 3.10
 
@@ -141,6 +152,20 @@ Agent 能檢查出「這裡沒寫 description」，但**不負責猜測正確的
 
 ---
 
+## 7. 擴大 Live Call 到寫入方法（POST/PUT/DELETE）
+
+跟 PM 討論後拍板：「有對外的 API 都要檢查」不只是指涵蓋所有 endpoint，也指檢查方法本身要全面，不能只做唯讀。目前 `agent/live_call.py` 只打 GET，這節記錄擴大範圍前需要先解決的問題（**尚未開始實作**）。
+
+**跟唯讀 GET 的差異**：GET 沒有副作用，打錯了頂多多讀一次；POST/PUT/DELETE 會真的在 dev 環境建立、修改、刪除資料，出錯的代價完全不同，不能照抄現在的做法直接套用。
+
+**開始實作前要先定案的事**：
+- **測試資料隔離**：要不要用一個專門的測試帳號/命名慣例（例如標題都以 `[agent-test]` 開頭），方便事後辨識、清理，也避免跟真人使用者的資料混在一起。
+- **清理策略**：每輪跑完是不是要把自己建立的資料刪掉？如果 DELETE 本身也在測試範圍內，刪除動作要怎麼驗證又不留下垃圾資料。
+- **跨 endpoint 的先後依賴**：像 Chat V2 要「建立對話 → 查詢 → 更新標題 → （目前沒有刪除端點）」串成一條流程，才測得到 PUT；FedFlow、Knowledge 等其他分頁也要各自盤點適合的流程順序。
+- **哪些 endpoint 先做**：建議先挑「有對應 GET 可以驗證結果」的 POST/PUT（例如建立後可以馬上 GET 回來比對），比「打了看不到結果」的更容易驗證，先從這類開始。
+
+---
+
 ## 待確認 / Open Questions
 
 1. 已確認：<https://fedgpt-dev.corp.ailabs.tw/swagger/>，OpenAPI 3.1.0 YAML，共 12 份可直接 HTTP GET 下載。
@@ -148,7 +173,7 @@ Agent 能檢查出「這裡沒寫 description」，但**不負責猜測正確的
 2.「跟上次執行比對」取代 3.10 baseline（見 3.2 節）。
 3. Jira 開票的目標 project、issue type、必填欄位規則。
 4. HTML report 的呈現內容與對象（給 PJM 看？給開發看？）。
-5. ~~Live call 驗證（第二階段）的啟動時機與範圍~~ — 已啟動 GET 部分並實測 dev 環境，抓到 3 類真實的文件/行為落差（`Conversation.disabled` 必填但實際回應沒有、`mode` 出現未宣告的值 `assistant`、`FAQ.description` 必填但實際缺漏）。POST/PUT/DELETE 因為有副作用，仍未啟動。
+5. ~~Live call 驗證（第二階段）的啟動時機與範圍~~ — 已啟動 GET 部分並實測 dev 環境，抓到 3 類真實的文件/行為落差（`Conversation.disabled` 必填但實際回應沒有、`mode` 出現未宣告的值 `assistant`、`FAQ.description` 必填但實際缺漏）。**新待確認**：PM 已拍板要擴大到 POST/PUT/DELETE（見第 7 節），但測試資料隔離/清理策略還沒定案，這點要先講好才能動工。
 6. CI / 排程整合的時間點——現在有了「跟上次執行比對」的機制後，這點變得更重要：要多久固定跑一次，才不會讓兩次執行之間累積太多變化，待後續討論再定案。
 
 ---
