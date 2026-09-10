@@ -1,0 +1,6 @@
+.env
+__pycache__/
+*.pyc
+reports/
+spec_snapshots/
+.vscode/
