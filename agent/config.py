@@ -37,7 +37,9 @@ TEAMS_WEBHOOK_URL = os.environ.get("TEAMS_WEBHOOK_URL", "")
 REQUEST_TIMEOUT_SECONDS = 20
 
 # --- Live call（第二階段，目前只做 GET）---
-FEDGPT_ACCESS_TOKEN = os.environ.get("FEDGPT_ACCESS_TOKEN", "")
+# Token 是各環境各自獨立的（帳號資料庫沒有共用），一個環境一個變數，用 --token 或這裡切換。
+FEDGPT_ACCESS_TOKEN = os.environ.get("FEDGPT_ACCESS_TOKEN", "")  # dev
+FEDGPT_STG2_TOKEN = os.environ.get("FEDGPT_STG2_TOKEN", "")  # stg2
 
 
 def derive_api_base_url(swagger_docs_base_url):
