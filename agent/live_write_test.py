@@ -19,6 +19,8 @@ FAQ / Knowledge 都需要帳號有對應的 admin 權限（`faq.admin` / `kb.adm
 live_write_skipped，不是硬規則意義上的 bug。
 """
 
+import mimetypes
+import os
 import time
 
 import requests
@@ -1065,5 +1067,207 @@ def run_fedflow_execute_test(entries, api_base_url, token, timeout=20, flow_id=N
                 f"POST execute → GET result 輪詢驗證通過，flow 執行成功結束（executionId={execution_id}）",
             )
         )
+
+    return findings
+
+
+def run_helix_voice_crud_test(entries, api_base_url, token, timeout=60):
+    """測試 Helix V1 的 `/voices`（自己管理的獨立聲紋）。
+
+    刻意不測 `/enrollment`——那是「一個帳號只能有一組」的資源，如果測試帳號已經有真實註冊，
+    這個 Agent 不應該去動它（也沒有安全的方式先確認「動了會不會影響到人」）。`/voices` 則是
+    可以無限建立、也有完整 GET/DELETE 的獨立資源，風險模式跟 Chat/FAQ/Knowledge 一致。
+
+    需要 config.HELIX_TEST_AUDIO_PATH 指到一個本機真的音檔（各機器路徑不同，不寫死進 repo，
+    透過環境變數指定）；沒有設定或檔案不存在就跳過測試，不是失敗。
+
+    ⚠️ 這裡也順便驗證一個文件模糊之處：`VoiceCreateInput.audioUris` 要的是「FedGPT 連得到
+    的網址」，spec 建議的取得方式是「走 Asset V2 上傳、把回傳的網址填進來」，但 Asset V2
+    實際回傳的是 `assetKey`，不是網址——兩者怎麼轉換文件沒講清楚。這裡會直接把 `assetKey`
+    當成 `audioUris` 送出去，不論成功或失敗都記錄成一筆 finding，把真實行為攤開來看。
+    """
+    from .config import HELIX_TEST_AUDIO_PATH
+
+    findings = []
+    filename, group = "helix-v1.yaml", "Helix V1"
+    asset_filename, asset_group = "asset-v2.yaml", "Asset V2"
+
+    if not HELIX_TEST_AUDIO_PATH or not os.path.isfile(HELIX_TEST_AUDIO_PATH):
+        findings.append(_finding("live_write_skipped", "info", filename, group, "沒有設定 HELIX_TEST_AUDIO_PATH 或檔案不存在，跳過 /voices 寫入測試"))
+        return findings
+
+    kb_entry = next((e for e in entries if e.get("filename") == filename and e.get("spec")), None)
+    asset_entry = next((e for e in entries if e.get("filename") == asset_filename and e.get("spec")), None)
+    if not kb_entry or not asset_entry:
+        missing = filename if not kb_entry else asset_filename
+        findings.append(_finding("live_write_skipped", "info", missing, group, f"找不到 {missing} 的 spec，跳過寫入測試"))
+        return findings
+
+    spec = kb_entry["spec"]
+    paths = spec.get("paths") or {}
+    asset_spec = asset_entry["spec"]
+    asset_paths = asset_spec.get("paths") or {}
+
+    def op_of(path, method):
+        op = paths[path][method]
+        op["__spec__"] = spec
+        return op
+
+    def asset_op(path, method):
+        op = asset_paths[path][method]
+        op["__spec__"] = asset_spec
+        return op
+
+    voices_path = "/public/helix/v1/voices"
+    voice_item_path_template = "/public/helix/v1/voices/{voiceId}"
+    presign_path = "/public/asset/v2/assets:presign"
+
+    session = requests.Session()
+    session.headers.update({"X-Access-Token": token, "Content-Type": "application/json"})
+    base = api_base_url.rstrip("/")
+    origin = base[: -len("/api")] if base.endswith("/api") else base
+
+    test_filename = "[agent-test]-" + os.path.basename(HELIX_TEST_AUDIO_PATH)
+    content_type = mimetypes.guess_type(HELIX_TEST_AUDIO_PATH)[0] or "audio/aac"
+    with open(HELIX_TEST_AUDIO_PATH, "rb") as fh:
+        audio_bytes = fh.read()
+
+    # Step 1：Asset V2 presign，拿上傳憑證
+    asset_key = None
+    form_data = {}
+    try:
+        resp = session.post(f"{base}{presign_path}", json={"contentType": content_type, "filename": test_filename}, timeout=timeout)
+        ok = _check_status_and_schema(asset_op(presign_path, "post"), resp, findings, asset_filename, asset_group, presign_path, "post")
+        if ok and resp.status_code == 200:
+            body = resp.json()
+            asset_key = body.get("assetKey")
+            form_data = body.get("formData") or {}
+        else:
+            findings.append(
+                _finding("live_write_aborted", "error", asset_filename, asset_group, f"POST presign 沒有回 200（實際 {resp.status_code}），中止文件寫入測試", path=presign_path, method="POST")
+            )
+    except requests.RequestException as exc:
+        findings.append(_finding("live_write_error", "error", asset_filename, asset_group, f"POST presign 失敗：{exc}", path=presign_path, method="POST"))
+
+    # Step 2：實際把音檔上傳到 S3 相容 storage
+    if asset_key:
+        try:
+            upload_resp = requests.post(f"{origin}/asset", data=form_data, files={"file": (test_filename, audio_bytes, content_type)}, timeout=timeout)
+            if not upload_resp.ok:
+                findings.append(
+                    _finding(
+                        "live_write_aborted",
+                        "error",
+                        asset_filename,
+                        asset_group,
+                        f"實際上傳音檔到 storage 失敗（{upload_resp.status_code}）：{upload_resp.text[:300]}，中止測試",
+                        path="/asset",
+                        method="POST",
+                    )
+                )
+                asset_key = None
+        except requests.RequestException as exc:
+            findings.append(_finding("live_write_error", "error", asset_filename, asset_group, f"實際上傳音檔到 storage 失敗：{exc}", path="/asset", method="POST"))
+            asset_key = None
+
+    if not asset_key:
+        return findings
+
+    findings.append(
+        _finding(
+            "live_write_permanent_residue",
+            "info",
+            asset_filename,
+            asset_group,
+            f"測試上傳的音檔（assetKey={asset_key}）會永久留在 storage，Asset V2 沒有提供任何刪除或查詢端點，這是已知且無法避免的殘留",
+        )
+    )
+
+    # Step 3：實測「把 assetKey 直接當 audioUris 送出去」到底成不成立
+    try:
+        resp = session.post(f"{base}{voices_path}", json={"audioUris": [asset_key]}, timeout=timeout)
+    except requests.RequestException as exc:
+        findings.append(_finding("live_write_error", "error", filename, group, f"POST 建立聲紋失敗：{exc}", path=voices_path, method="POST"))
+        return findings
+
+    if _is_permission_denied(resp):
+        findings.append(_finding("live_write_skipped", "info", filename, group, f"測試帳號沒有建立聲紋的權限（{resp.status_code}），跳過這組測試", path=voices_path, method="POST"))
+        return findings
+
+    _check_status_and_schema(op_of(voices_path, "post"), resp, findings, filename, group, voices_path, "post")
+
+    if resp.status_code != 200:
+        findings.append(
+            _finding(
+                "spec_description_mismatch",
+                "warning",
+                filename,
+                group,
+                f"spec 建議『Asset V2 上傳後把網址填進來』作為 audioUris，但直接把 assetKey（{asset_key}）當成 audioUris 送出，實際回應是 {resp.status_code}——"
+                "代表這兩支 API 之間怎麼銜接，文件沒有講清楚：assetKey 不能（或至少不是能直接這樣）當 audioUris 用",
+                path=voices_path,
+                method="POST",
+            )
+        )
+        return findings
+
+    try:
+        voice_id = resp.json()["voiceId"]
+    except Exception as exc:  # noqa: BLE001
+        findings.append(_finding("live_write_aborted", "error", filename, group, f"POST 回應裡拿不到 voiceId：{exc}", path=voices_path, method="POST"))
+        return findings
+
+    findings.append(
+        _finding(
+            "live_write_ok",
+            "info",
+            filename,
+            group,
+            f"意外發現：把 assetKey 直接當 audioUris 送出去，實際成功建立了聲紋（voiceId={voice_id}）——這條路其實是通的，只是文件沒有明講",
+            path=voices_path,
+            method="POST",
+        )
+    )
+
+    voice_item_path = voice_item_path_template.replace("{voiceId}", voice_id)
+
+    # Step 4：GET 驗證
+    try:
+        resp = session.get(f"{base}{voice_item_path}", timeout=timeout)
+        _check_status_and_schema(op_of(voice_item_path_template, "get"), resp, findings, filename, group, voice_item_path_template, "get")
+    except requests.RequestException as exc:
+        findings.append(_finding("live_write_error", "error", filename, group, f"GET 驗證聲紋失敗：{exc}", path=voice_item_path_template, method="GET"))
+
+    # Step 5：DELETE 清除
+    delete_ok = False
+    try:
+        resp = session.delete(f"{base}{voice_item_path}", timeout=timeout)
+        delete_ok = _check_status_and_schema(op_of(voice_item_path_template, "delete"), resp, findings, filename, group, voice_item_path_template, "delete")
+    except requests.RequestException as exc:
+        findings.append(
+            _finding("live_write_cleanup_failed", "error", filename, group, f"DELETE 聲紋失敗：{exc}，voiceId={voice_id} 需要手動清理", path=voice_item_path_template, method="DELETE")
+        )
+
+    # Step 6：GET 驗證真的刪了
+    if delete_ok:
+        try:
+            resp = session.get(f"{base}{voice_item_path}", timeout=timeout)
+            if resp.status_code != 404:
+                findings.append(
+                    _finding(
+                        "live_write_cleanup_failed",
+                        "error",
+                        filename,
+                        group,
+                        f"DELETE 聲紋回 200，但 GET 還是拿到 {resp.status_code}（預期 404），voiceId={voice_id} 可能沒有真的刪除",
+                        path=voice_item_path_template,
+                        method="DELETE",
+                    )
+                )
+        except requests.RequestException as exc:
+            findings.append(_finding("live_write_error", "warning", filename, group, f"GET 驗證聲紋刪除結果失敗：{exc}", path=voice_item_path_template, method="GET"))
+
+    if not any(f["rule"].startswith("live_write_") and f["severity"] == "error" for f in findings):
+        findings.append(_finding("live_write_ok", "info", filename, group, f"聲紋的 POST → GET → DELETE → GET 全部驗證通過，測試資料（{voice_id}）已清除乾淨"))
 
     return findings

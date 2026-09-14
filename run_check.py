@@ -35,6 +35,7 @@ from agent.live_write_test import (
     run_faq_crud_test,
     run_faq_entry_crud_test,
     run_fedflow_execute_test,
+    run_helix_voice_crud_test,
     run_knowledge_crud_test,
     run_knowledge_document_crud_test,
 )
@@ -116,6 +117,7 @@ def main():
             run_knowledge_crud_test,
             run_knowledge_document_crud_test,
             run_fedflow_execute_test,
+            run_helix_voice_crud_test,
         ):
             write_findings = run_test(entries, api_base_url, args.token)
             findings.extend(write_findings)

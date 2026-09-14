@@ -151,7 +151,7 @@ def render_html(findings, entries, base_url):
                 "sec-live-write",
                 "Live Call — 寫入方法測試（POST/PUT/DELETE）",
                 live_write_findings,
-                note="小範圍驗證：目前只涵蓋 Chat V2 對話的建立／查詢／更新／刪除流程，不是全面涵蓋所有寫入端點。",
+                note="小範圍驗證：目前涵蓋 Chat V2 對話、FAQ 問答集與 entry、Knowledge 知識庫與文件、FedFlow 執行、Helix 聲紋，不是全面涵蓋所有寫入端點。",
             )
         )
     if has_diff:
@@ -259,7 +259,7 @@ def render_html(findings, entries, base_url):
     font-size: 14.5px;
     line-height: 1.55;
   }}
-  .wrap {{ max-width: 1080px; margin: 0 auto; padding: 40px 24px 80px; }}
+  .wrap {{ max-width: 1440px; margin: 0 auto; padding: 40px 24px 80px; }}
   .mono {{ font-family: "IBM Plex Mono", ui-monospace, "SFMono-Regular", monospace; }}
   code, .mono {{ font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 0.92em; }}
   code {{ background: var(--surface-2); padding: 1px 6px; border-radius: 4px; color: var(--text); }}
@@ -340,10 +340,20 @@ def render_html(findings, entries, base_url):
   .empty {{ color: var(--ok); font-weight: 600; padding: 16px 0 4px; }}
 
   .table-scroll {{ overflow-x: auto; margin-top: 12px; }}
-  table {{ border-collapse: collapse; width: 100%; min-width: 720px; font-size: 13px; }}
-  th, td {{ padding: 8px 10px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--border); }}
+  table {{ border-collapse: collapse; width: 100%; table-layout: fixed; font-size: 13px; }}
+  th, td {{ padding: 8px 10px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--border); word-break: break-word; overflow-wrap: anywhere; }}
   th {{ color: var(--text-muted); font-weight: 600; font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.04em; }}
   tbody tr:last-child td {{ border-bottom: none; }}
+  th:nth-child(1), td:nth-child(1) {{ width: 8%; }}
+  th:nth-child(2), td:nth-child(2) {{ width: 11%; }}
+  th:nth-child(3), td:nth-child(3) {{ width: 20%; }}
+  th:nth-child(4), td:nth-child(4) {{ width: 12%; }}
+  th:nth-child(5), td:nth-child(5) {{ width: 36%; }}
+  th:nth-child(6), td:nth-child(6) {{ width: 13%; }}
+  @media (max-width: 640px) {{
+    table {{ table-layout: auto; min-width: 640px; }}
+    th:nth-child(n), td:nth-child(n) {{ width: auto; }}
+  }}
 
   .chip {{ font-size: 11.5px; font-weight: 700; padding: 2px 8px; border-radius: 6px; white-space: nowrap; }}
   .chip-error {{ background: var(--error-soft); color: var(--error); }}

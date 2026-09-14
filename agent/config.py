@@ -48,6 +48,11 @@ FEDGPT_STG2_TOKEN = os.environ.get("FEDGPT_STG2_TOKEN", "")  # stg2
 # 屆時會收到 404，測試會视為「這個環境沒有可用的測試 flow」並跳過，而不是當成錯誤。
 FEDFLOW_TEST_FLOW_ID = os.environ.get("FEDFLOW_TEST_FLOW_ID", "212913c58069778f5f399a3f466d7ffc")  # stg2 flow "Second"
 
+# --- 高風險端點寫入測試：Helix V1 聲紋（/voices） ---
+# 需要一個真的音檔才能測，本機路徑因人而異，不寫死進 repo，用環境變數指定。
+# 沒有設定或檔案不存在就跳過這個測試（視為未設置，不是失敗）。
+HELIX_TEST_AUDIO_PATH = os.environ.get("HELIX_TEST_AUDIO_PATH", "")
+
 
 def derive_api_base_url(swagger_docs_base_url):
     """從 swagger docs 的 base URL 推回實際打 API 要用的 origin + /api。
