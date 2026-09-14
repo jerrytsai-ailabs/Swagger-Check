@@ -1498,6 +1498,24 @@ def run_asura_tts_test(entries, api_base_url, token, timeout=60):
         "modelConfig": {"model": "tts-general-1.3.3", "voice": "yating"},
     }
 
+    # 這個發現是固定記錄，不是靠現場觸發錯誤才報：spec 對 modelConfig.model 給的範例值
+    # `tts-general-0.0.1` 實測在 stg2 並不存在（打下去後端回 inferno.get-model.failed，
+    # 內部查模型收到 404），而且 spec 完全沒有提供任何端點可以查詢這個部署實際支援的 TTS
+    # 模型名稱——不像 Chat V2 有 GET /models 可查。確認可用的版本（`tts-general-1.3.3`）
+    # 是額外詢問熟悉部署的人才拿到的，不是文件或 API 能自己查出來的。
+    findings.append(
+        _finding(
+            "spec_description_mismatch",
+            "warning",
+            filename,
+            group,
+            "SpeechModelConfig.model 的 spec 範例值 'tts-general-0.0.1' 在 stg2 實測不存在（後端查模型收到 404，reason=inferno.get-model.failed），"
+            "且 spec 沒有提供任何端點可查詢這個部署實際支援的 TTS 模型名稱清單（不像 Chat V2 有 GET /models）——正確版本（tts-general-1.3.3）只能問熟悉部署的人才拿得到",
+            path=tts_path,
+            method="POST",
+        )
+    )
+
     # Step 0：故意不帶 audioConfig，實測 spec 說它選填是否屬實
     try:
         probe_resp = session.post(f"{base}{tts_path}", json=base_body, timeout=timeout)
