@@ -4,3 +4,4 @@ __pycache__/
 reports/
 spec_snapshots/
 .vscode/
+.claude/
