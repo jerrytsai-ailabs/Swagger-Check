@@ -31,7 +31,9 @@ from agent.config import (
 from agent.fetch import fetch_specs, load_local_specs
 from agent.live_call import run_live_get_checks
 from agent.live_write_test import (
+    run_asura_tts_test,
     run_auth_apikey_crud_test,
+    run_chat_send_message_test,
     run_conversation_crud_test,
     run_faq_crud_test,
     run_faq_entry_crud_test,
@@ -39,6 +41,7 @@ from agent.live_write_test import (
     run_helix_voice_crud_test,
     run_knowledge_crud_test,
     run_knowledge_document_crud_test,
+    run_llm_embeddings_test,
 )
 from agent.llm_check import run_llm_checks
 from agent.report import render_html
@@ -120,6 +123,9 @@ def main():
             run_fedflow_execute_test,
             run_helix_voice_crud_test,
             run_auth_apikey_crud_test,
+            run_llm_embeddings_test,
+            run_asura_tts_test,
+            run_chat_send_message_test,
         ):
             write_findings = run_test(entries, api_base_url, args.token)
             findings.extend(write_findings)

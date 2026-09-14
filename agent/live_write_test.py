@@ -1399,3 +1399,300 @@ def run_auth_apikey_crud_test(entries, api_base_url, token, timeout=30):
         findings.append(_finding("live_write_ok", "info", filename, group, "API key 的 POST → GET → 批次 DELETE → GET 全部驗證通過，測試用的 key 已清除乾淨"))
 
     return findings
+
+
+def run_llm_embeddings_test(entries, api_base_url, token, timeout=30):
+    """測試 LLM V1 的 embeddings（`POST /llm/v1/retriever/v1/embeddings`）。
+
+    這支是無狀態的呼叫——沒有持久化資源，呼叫完就結束，不需要任何清理。
+    """
+    findings = []
+    filename, group = "llm-v1.yaml", "LLM V1"
+    entry = next((e for e in entries if e.get("filename") == filename and e.get("spec")), None)
+    if not entry:
+        findings.append(_finding("live_write_skipped", "info", filename, group, f"找不到 {filename} 的 spec，跳過寫入測試"))
+        return findings
+
+    spec = entry["spec"]
+    paths = spec.get("paths") or {}
+
+    def op_of(path, method):
+        op = paths[path][method]
+        op["__spec__"] = spec
+        return op
+
+    embeddings_path = "/public/llm/v1/retriever/v1/embeddings"
+    session = requests.Session()
+    session.headers.update({"X-Access-Token": token, "Content-Type": "application/json"})
+    base = api_base_url.rstrip("/")
+
+    test_input = "[agent-test] live-call embeddings 驗證"
+    try:
+        resp = session.post(f"{base}{embeddings_path}", json={"model": "embedding-v3.0", "input": [test_input]}, timeout=timeout)
+    except requests.RequestException as exc:
+        findings.append(_finding("live_write_error", "error", filename, group, f"POST embeddings 失敗：{exc}", path=embeddings_path, method="POST"))
+        return findings
+
+    if _is_permission_denied(resp):
+        findings.append(_finding("live_write_skipped", "info", filename, group, f"測試帳號沒有呼叫 embeddings 的權限（{resp.status_code}），跳過這組測試", path=embeddings_path, method="POST"))
+        return findings
+
+    ok = _check_status_and_schema(op_of(embeddings_path, "post"), resp, findings, filename, group, embeddings_path, "post")
+    if not ok or resp.status_code != 200:
+        findings.append(_finding("live_write_aborted", "error", filename, group, f"POST embeddings 沒有回 200（實際 {resp.status_code}），中止測試", path=embeddings_path, method="POST"))
+        return findings
+
+    try:
+        body = resp.json()
+        data = body["data"]
+        if len(data) != 1:
+            findings.append(_finding("live_write_data_mismatch", "error", filename, group, f"送出 1 筆 input，但 data 回來 {len(data)} 筆", path=embeddings_path, method="POST"))
+        elif data[0].get("index") != 0 or not data[0].get("embedding"):
+            findings.append(
+                _finding("live_write_data_mismatch", "error", filename, group, f"回應的 data[0] 內容不合預期：index={data[0].get('index')}，embedding 長度={len(data[0].get('embedding') or [])}", path=embeddings_path, method="POST")
+            )
+    except Exception as exc:  # noqa: BLE001
+        findings.append(_finding("live_write_aborted", "error", filename, group, f"解析 embeddings 回應失敗：{exc}", path=embeddings_path, method="POST"))
+        return findings
+
+    if not any(f["rule"].startswith("live_write_") and f["severity"] == "error" for f in findings):
+        findings.append(_finding("live_write_ok", "info", filename, group, f"embeddings 呼叫成功，向量維度 {len(data[0]['embedding'])}，index 對應正確"))
+
+    return findings
+
+
+def run_asura_tts_test(entries, api_base_url, token, timeout=60):
+    """測試 Asura V1 的文字轉語音（`POST /asura/v1/speeches:stream`，固定音色版本）。
+
+    無狀態呼叫，回應是音訊二進位資料不是 JSON，不需要清理。這支端點不是每個部署都有，
+    沒開的部署會拿到 404，視為「這個環境沒有這個功能」而跳過，不是失敗。
+
+    這裡也順便主動驗證一個 spec 描述：`SpeechInput.audioConfig` 在 spec 裡宣告是選填
+    （`required` 只列了 `modelConfig`），先故意不帶 `audioConfig` 打一次，把實際回應記成
+    一筆 finding（一致或不一致都記），再補上 `audioConfig` 重打一次驗證真正的合成流程。
+    """
+    findings = []
+    filename, group = "asura-v1.yaml", "Asura V1"
+    entry = next((e for e in entries if e.get("filename") == filename and e.get("spec")), None)
+    if not entry:
+        findings.append(_finding("live_write_skipped", "info", filename, group, f"找不到 {filename} 的 spec，跳過寫入測試"))
+        return findings
+
+    spec = entry["spec"]
+    paths = spec.get("paths") or {}
+
+    def op_of(path, method):
+        op = paths[path][method]
+        op["__spec__"] = spec
+        return op
+
+    tts_path = "/public/asura/v1/speeches:stream"
+    session = requests.Session()
+    session.headers.update({"X-Access-Token": token, "Content-Type": "application/json"})
+    base = api_base_url.rstrip("/")
+
+    base_body = {
+        "input": {"text": "[agent-test] live-call 文字轉語音驗證", "type": "text"},
+        # spec 範例值 tts-general-0.0.1 在 stg2 實測不存在（inferno.get-model.failed）；
+        # 實際問過才確認 tts-general-1.3.3 才是這個環境真正可用的 TTS 模型版本。
+        "modelConfig": {"model": "tts-general-1.3.3", "voice": "yating"},
+    }
+
+    # Step 0：故意不帶 audioConfig，實測 spec 說它選填是否屬實
+    try:
+        probe_resp = session.post(f"{base}{tts_path}", json=base_body, timeout=timeout)
+        if probe_resp.status_code == 200:
+            findings.append(
+                _finding("live_write_ok", "info", filename, group, "不帶 audioConfig 也能成功合成，跟 spec 宣告的選填一致", path=tts_path, method="POST")
+            )
+        elif probe_resp.status_code not in (404,):
+            try:
+                probe_msg = probe_resp.json().get("message", "")
+            except ValueError:
+                probe_msg = ""
+            findings.append(
+                _finding(
+                    "spec_description_mismatch",
+                    "warning",
+                    filename,
+                    group,
+                    f"spec 宣告 SpeechInput.audioConfig 是選填（required 只列 modelConfig），但不帶它實際回應是 {probe_resp.status_code}：{probe_msg}——代表伺服器端其實把它當必填",
+                    path=tts_path,
+                    method="POST",
+                )
+            )
+    except requests.RequestException:
+        pass  # 這只是探測性質，失敗不影響下面正式測試
+
+    # 正式測試：帶上 audioConfig，驗證真正的合成流程
+    body = dict(base_body, audioConfig={"encoding": "LINEAR16"})
+    try:
+        resp = session.post(f"{base}{tts_path}", json=body, timeout=timeout)
+    except requests.RequestException as exc:
+        findings.append(_finding("live_write_error", "error", filename, group, f"POST 文字轉語音失敗：{exc}", path=tts_path, method="POST"))
+        return findings
+
+    if _is_permission_denied(resp):
+        findings.append(_finding("live_write_skipped", "info", filename, group, f"測試帳號沒有呼叫文字轉語音的權限（{resp.status_code}），跳過這組測試", path=tts_path, method="POST"))
+        return findings
+
+    if resp.status_code == 404:
+        findings.append(_finding("live_write_skipped", "info", filename, group, "這個部署沒有啟用文字轉語音（404），跳過這組測試", path=tts_path, method="POST"))
+        return findings
+
+    ok = _check_status_and_schema(op_of(tts_path, "post"), resp, findings, filename, group, tts_path, "post")
+    if not ok or resp.status_code != 200:
+        try:
+            resp_reason = resp.json().get("reason", "")
+        except ValueError:
+            resp_reason = ""
+        if resp_reason == "inferno.get-model.failed":
+            findings.append(
+                _finding(
+                    "spec_description_mismatch",
+                    "warning",
+                    filename,
+                    group,
+                    f"spec 的 modelConfig.model 範例值 {body['modelConfig']['model']!r} 在這個環境實際上不存在（後端查模型收到 404），"
+                    "而且 spec 沒有提供任何端點可以查詢這個部署實際支援的 TTS 模型名稱——不像 Chat V2 有 GET /models，光靠文件組不出保證能用的請求",
+                    path=tts_path,
+                    method="POST",
+                )
+            )
+        findings.append(_finding("live_write_aborted", "error", filename, group, f"POST 文字轉語音沒有回 200（實際 {resp.status_code}），中止測試", path=tts_path, method="POST"))
+        return findings
+
+    content_type = resp.headers.get("Content-Type", "")
+    if "audio" not in content_type:
+        findings.append(_finding("live_write_data_mismatch", "error", filename, group, f"回應 Content-Type 是 {content_type!r}，預期是 audio/*", path=tts_path, method="POST"))
+    elif len(resp.content) == 0:
+        findings.append(_finding("live_write_data_mismatch", "error", filename, group, "回應的音訊內容是空的", path=tts_path, method="POST"))
+
+    if not any(f["rule"].startswith("live_write_") and f["severity"] == "error" for f in findings):
+        findings.append(_finding("live_write_ok", "info", filename, group, f"文字轉語音呼叫成功，收到 {len(resp.content)} bytes 的 {content_type} 音訊"))
+
+    return findings
+
+
+def run_chat_send_message_test(entries, api_base_url, token, timeout=90):
+    """測試 Chat V2 送訊息（`POST /chat/v2/chat/normal`）。
+
+    這是真的呼叫一次 LLM，會有實際的 API 用量／成本，也會等模型把整段回答產生完才回應
+    （可能要等一段時間）。為了不影響既有的 `run_conversation_crud_test`，這裡自己建立、
+    自己刪除一個獨立的臨時對話，不共用資料。
+    """
+    findings = []
+    filename, group = "chat-v2.yaml", "Chat V2"
+    entry = next((e for e in entries if e.get("filename") == filename and e.get("spec")), None)
+    if not entry:
+        findings.append(_finding("live_write_skipped", "info", filename, group, f"找不到 {filename} 的 spec，跳過寫入測試"))
+        return findings
+
+    spec = entry["spec"]
+    paths = spec.get("paths") or {}
+
+    def op_of(path, method):
+        op = paths[path][method]
+        op["__spec__"] = spec
+        return op
+
+    conversations_path = "/public/chat/v2/conversations"
+    conversation_item_path_template = "/public/chat/v2/conversations/{convId}"
+    chat_normal_path = "/public/chat/v2/chat/normal"
+    models_path = "/public/chat/v2/models"
+
+    session = requests.Session()
+    session.headers.update({"X-Access-Token": token, "Content-Type": "application/json"})
+    base = api_base_url.rstrip("/")
+
+    try:
+        resp = session.get(f"{base}{models_path}", timeout=timeout)
+        resp.raise_for_status()
+        models = resp.json().get("models") or []
+        if not models:
+            findings.append(_finding("live_write_error", "error", filename, group, "GET /models 沒有回傳任何模型，無法建立測試對話", path=models_path, method="GET"))
+            return findings
+        model_id = models[0]["id"]
+    except Exception as exc:  # noqa: BLE001
+        findings.append(_finding("live_write_error", "error", filename, group, f"取得模型清單失敗：{exc}", path=models_path, method="GET"))
+        return findings
+
+    # Step 1：建立臨時對話
+    try:
+        resp = session.post(f"{base}{conversations_path}", json={"conversation": {"title": TEST_TITLE, "mode": "normal", "model": model_id}}, timeout=timeout)
+    except requests.RequestException as exc:
+        findings.append(_finding("live_write_error", "error", filename, group, f"POST 建立測試對話失敗：{exc}", path=conversations_path, method="POST"))
+        return findings
+
+    if _is_permission_denied(resp):
+        findings.append(_finding("live_write_skipped", "info", filename, group, f"測試帳號沒有建立對話的權限（{resp.status_code}），跳過這組測試", path=conversations_path, method="POST"))
+        return findings
+
+    ok = _check_status_and_schema(op_of(conversations_path, "post"), resp, findings, filename, group, conversations_path, "post")
+    if not ok or resp.status_code != 200:
+        findings.append(_finding("live_write_aborted", "error", filename, group, f"POST 建立測試對話沒有回 200（實際 {resp.status_code}），中止測試", path=conversations_path, method="POST"))
+        return findings
+
+    try:
+        conv_id = resp.json()["conversation"]["convId"]
+    except Exception as exc:  # noqa: BLE001
+        findings.append(_finding("live_write_aborted", "error", filename, group, f"POST 回應裡拿不到 convId，中止測試：{exc}", path=conversations_path, method="POST"))
+        return findings
+
+    conversation_item_path = conversation_item_path_template.replace("{convId}", conv_id)
+
+    # Step 2：送一則訊息，真的呼叫一次 LLM
+    try:
+        resp = session.post(
+            f"{base}{chat_normal_path}",
+            json={"convId": conv_id, "message": {"text": "[agent-test] live-call chat 送訊息驗證，請用一句話簡短回覆"}},
+            timeout=timeout,
+        )
+        ok = _check_status_and_schema(op_of(chat_normal_path, "post"), resp, findings, filename, group, chat_normal_path, "post")
+        if ok and resp.status_code == 200:
+            body = resp.json()
+            if body.get("convId") != conv_id:
+                findings.append(
+                    _finding("live_write_data_mismatch", "error", filename, group, f"回應的 convId（{body.get('convId')}）跟送出的 convId（{conv_id}）不一致", path=chat_normal_path, method="POST")
+                )
+            elif not body.get("messages"):
+                findings.append(_finding("live_write_data_mismatch", "error", filename, group, "回應的 messages 是空的，預期至少有一則模型的回覆", path=chat_normal_path, method="POST"))
+        else:
+            findings.append(
+                _finding("live_write_aborted", "error", filename, group, f"POST 送訊息沒有回 200（實際 {resp.status_code}），中止測試（仍會嘗試清理臨時對話）", path=chat_normal_path, method="POST")
+            )
+    except requests.RequestException as exc:
+        findings.append(_finding("live_write_error", "error", filename, group, f"POST 送訊息失敗：{exc}", path=chat_normal_path, method="POST"))
+
+    # Step 3：清掉臨時對話（訊息會隨對話一起清掉，不用另外處理）
+    try:
+        resp = session.delete(f"{base}{conversation_item_path}", timeout=timeout)
+        delete_ok = _check_status_and_schema(op_of(conversation_item_path_template, "delete"), resp, findings, filename, group, conversation_item_path_template, "delete")
+    except requests.RequestException as exc:
+        findings.append(
+            _finding("live_write_cleanup_failed", "error", filename, group, f"DELETE 測試對話失敗：{exc}，convId={conv_id} 需要手動清理", path=conversation_item_path_template, method="DELETE")
+        )
+        delete_ok = False
+
+    if delete_ok:
+        try:
+            resp = session.get(f"{base}{conversation_item_path}", timeout=timeout)
+            if resp.status_code != 404:
+                findings.append(
+                    _finding(
+                        "live_write_cleanup_failed",
+                        "error",
+                        filename,
+                        group,
+                        f"DELETE 測試對話回 200，但 GET 還是拿到 {resp.status_code}（預期 404），convId={conv_id} 可能沒有真的刪除",
+                        path=conversation_item_path_template,
+                        method="DELETE",
+                    )
+                )
+        except requests.RequestException as exc:
+            findings.append(_finding("live_write_error", "warning", filename, group, f"GET 驗證刪除結果失敗：{exc}", path=conversation_item_path_template, method="GET"))
+
+    if not any(f["rule"].startswith("live_write_") and f["severity"] == "error" for f in findings):
+        findings.append(_finding("live_write_ok", "info", filename, group, f"送訊息 → 驗證回應 → 刪除臨時對話全部驗證通過（convId={conv_id}）"))
+
+    return findings
