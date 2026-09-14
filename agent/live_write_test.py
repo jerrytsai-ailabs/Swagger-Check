@@ -1271,3 +1271,131 @@ def run_helix_voice_crud_test(entries, api_base_url, token, timeout=60):
         findings.append(_finding("live_write_ok", "info", filename, group, f"聲紋的 POST → GET → DELETE → GET 全部驗證通過，測試資料（{voice_id}）已清除乾淨"))
 
     return findings
+
+
+def run_auth_apikey_crud_test(entries, api_base_url, token, timeout=30):
+    """測試 Auth V2 的 API key（`/apikeys`、`/apikeys:batchDelete`）。
+
+    這支沒有 PUT/更新端點，所以流程是「建立 → GET 清單驗證存在 → 批次刪除 → GET 清單驗證消失」。
+
+    ⚠️ 這把 key 建立後到刪除前的短暫時間內，是一把真的能用來呼叫 API 的有效憑證——這裡不會
+    拿它去打任何其他 API，只用來驗證這組端點本身的行為，測完立刻刪除。效期刻意設得很短
+    （建立時間 + 1 小時），把暴露窗口縮到最小。
+
+    帳號每人最多 25 把 key，如果建立時剛好卡在配額上限（`400 apikey.quota-exceeded`），視為
+    「無法測試」回報 info 等級的 live_write_skipped，不是硬規則意義上的 bug。
+    """
+    findings = []
+    filename, group = "auth-v2.yaml", "Auth V2"
+    entry = next((e for e in entries if e.get("filename") == filename and e.get("spec")), None)
+    if not entry:
+        findings.append(_finding("live_write_skipped", "info", filename, group, f"找不到 {filename} 的 spec，跳過寫入測試"))
+        return findings
+
+    spec = entry["spec"]
+    paths = spec.get("paths") or {}
+
+    def op_of(path, method):
+        op = paths[path][method]
+        op["__spec__"] = spec
+        return op
+
+    apikeys_path = "/public/auth/v2/apikeys"
+    batch_delete_path = "/public/auth/v2/apikeys:batchDelete"
+
+    session = requests.Session()
+    session.headers.update({"X-Access-Token": token, "Content-Type": "application/json"})
+    base = api_base_url.rstrip("/")
+
+    # Step 1：建立一把效期很短的 key
+    expired_at = int(time.time()) + 3600
+    try:
+        resp = session.post(f"{base}{apikeys_path}", json={"number": 1, "expiredAt": expired_at}, timeout=timeout)
+    except requests.RequestException as exc:
+        findings.append(_finding("live_write_error", "error", filename, group, f"POST 建立 API key 失敗：{exc}", path=apikeys_path, method="POST"))
+        return findings
+
+    if _is_permission_denied(resp):
+        findings.append(_finding("live_write_skipped", "info", filename, group, f"測試帳號沒有建立 API key 的權限（{resp.status_code}），跳過這組測試", path=apikeys_path, method="POST"))
+        return findings
+
+    if resp.status_code == 400:
+        try:
+            reason = resp.json().get("reason", "")
+        except ValueError:
+            reason = ""
+        if reason == "apikey.quota-exceeded":
+            findings.append(_finding("live_write_skipped", "info", filename, group, "測試帳號的 API key 數量已達上限（25 把），跳過這組測試", path=apikeys_path, method="POST"))
+            return findings
+
+    ok = _check_status_and_schema(op_of(apikeys_path, "post"), resp, findings, filename, group, apikeys_path, "post")
+    if not ok or resp.status_code != 200:
+        findings.append(_finding("live_write_aborted", "error", filename, group, f"POST 建立 API key 沒有回 200（實際 {resp.status_code}），中止後續步驟", path=apikeys_path, method="POST"))
+        return findings
+
+    try:
+        created_key = resp.json()["keys"][0]
+    except Exception as exc:  # noqa: BLE001
+        findings.append(_finding("live_write_aborted", "error", filename, group, f"POST 回應裡拿不到 key，中止後續步驟：{exc}", path=apikeys_path, method="POST"))
+        return findings
+
+    # Step 2：GET 清單，驗證剛建立的 key 存在且 expiredAt 一致
+    try:
+        resp = session.get(f"{base}{apikeys_path}", params={"limit": 100}, timeout=timeout)
+        _check_status_and_schema(op_of(apikeys_path, "get"), resp, findings, filename, group, apikeys_path, "get")
+        items = resp.json().get("items") or []
+        matched = next((it for it in items if it.get("key") == created_key), None)
+        if not matched:
+            findings.append(
+                _finding("live_write_data_mismatch", "error", filename, group, f"GET 清單裡找不到剛建立的 key（{created_key}）", path=apikeys_path, method="GET")
+            )
+        elif matched.get("expiredAt") != expired_at:
+            findings.append(
+                _finding(
+                    "live_write_data_mismatch",
+                    "error",
+                    filename,
+                    group,
+                    f"清單裡這把 key 的 expiredAt 是 {matched.get('expiredAt')}，跟建立時送出的 {expired_at} 不一致",
+                    path=apikeys_path,
+                    method="GET",
+                )
+            )
+    except requests.RequestException as exc:
+        findings.append(_finding("live_write_error", "error", filename, group, f"GET 驗證建立內容失敗：{exc}", path=apikeys_path, method="GET"))
+
+    # Step 3：批次刪除
+    try:
+        resp = session.delete(f"{base}{batch_delete_path}", params={"keys": [created_key]}, timeout=timeout)
+        delete_ok = _check_status_and_schema(op_of(batch_delete_path, "delete"), resp, findings, filename, group, batch_delete_path, "delete")
+        delete_ok = delete_ok and resp.status_code == 200
+    except requests.RequestException as exc:
+        findings.append(
+            _finding("live_write_cleanup_failed", "error", filename, group, f"批次刪除 API key 失敗：{exc}，key={created_key} 需要手動清理", path=batch_delete_path, method="DELETE")
+        )
+        delete_ok = False
+
+    # Step 4：GET 清單，驗證真的刪了
+    if delete_ok:
+        try:
+            resp = session.get(f"{base}{apikeys_path}", params={"limit": 100}, timeout=timeout)
+            items = resp.json().get("items") or []
+            if any(it.get("key") == created_key for it in items):
+                findings.append(
+                    _finding(
+                        "live_write_cleanup_failed",
+                        "error",
+                        filename,
+                        group,
+                        f"批次刪除回 200，但 GET 清單裡還是找得到這把 key（{created_key}），可能沒有真的刪除",
+                        path=apikeys_path,
+                        method="GET",
+                    )
+                )
+        except requests.RequestException as exc:
+            findings.append(_finding("live_write_error", "warning", filename, group, f"GET 驗證刪除結果失敗：{exc}", path=apikeys_path, method="GET"))
+
+    if not any(f["rule"].startswith("live_write_") and f["severity"] == "error" for f in findings):
+        findings.append(_finding("live_write_ok", "info", filename, group, "API key 的 POST → GET → 批次 DELETE → GET 全部驗證通過，測試用的 key 已清除乾淨"))
+
+    return findings
