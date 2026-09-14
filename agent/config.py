@@ -41,6 +41,13 @@ REQUEST_TIMEOUT_SECONDS = 20
 FEDGPT_ACCESS_TOKEN = os.environ.get("FEDGPT_ACCESS_TOKEN", "")  # dev
 FEDGPT_STG2_TOKEN = os.environ.get("FEDGPT_STG2_TOKEN", "")  # stg2
 
+# --- 高風險端點寫入測試：FedFlow execute ---
+# 這支端點沒有 DELETE、執行了就無法復原，所以不像 Chat/FAQ/Knowledge 那樣即興建立測試資料，
+# 而是固定打一個事先人工確認過「無副作用」的 flow（單純 DirectReply，不寄信、不寫外部資料）。
+# 這個 flow 目前只存在於 stg2 測試帳號看得到的清單裡，其他環境（例如 dev）沒有這個 flow id，
+# 屆時會收到 404，測試會视為「這個環境沒有可用的測試 flow」並跳過，而不是當成錯誤。
+FEDFLOW_TEST_FLOW_ID = os.environ.get("FEDFLOW_TEST_FLOW_ID", "212913c58069778f5f399a3f466d7ffc")  # stg2 flow "Second"
+
 
 def derive_api_base_url(swagger_docs_base_url):
     """從 swagger docs 的 base URL 推回實際打 API 要用的 origin + /api。

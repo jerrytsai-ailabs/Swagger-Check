@@ -20,6 +20,7 @@ pip install -r requirements.txt
 |---|---|---|
 | `FEDGPT_ACCESS_TOKEN` | live call 打 **dev** 環境要用的 token | 跟熟悉 dev 帳號的人要一組 access token |
 | `FEDGPT_STG2_TOKEN` | live call 打 **stg2** 環境要用的 token | 同上，但要 stg2 環境的帳號——**兩邊 token 不能互通**，各環境帳號資料庫是分開的 |
+| `FEDFLOW_TEST_FLOW_ID` | `--live-write` 測 FedFlow execute 要打的 flow id | 選填，預設是 stg2 上一個已人工確認「無副作用」的 flow（`212913c58069778f5f399a3f466d7ffc`，名稱 "Second"）。這個 flow 只存在於 stg2，對其他環境跑會直接跳過（回 404 視為無可用測試 flow） |
 | `GOOGLE_CHAT_WEBHOOK_URL` | `--notify` 推播用 | 目標 Google Chat Space → Apps & integrations → Webhooks |
 | `TEAMS_WEBHOOK_URL` | `--notify-teams` 推播用 | Teams 頻道/對話 → Workflows → 建一個 "When a Teams webhook request is received" 的 flow |
 
@@ -41,7 +42,9 @@ python run_check.py --base-url https://fedgpt-stg2-vm1.corp.ailabs.tw/swagger/do
 .\test_stg2.ps1 --notify-teams   # 後面接的參數都會轉給 run_check.py
 ```
 
-⚠️ **`--live-write` 會真的建立、修改、刪除資料**（Chat V2 對話、FAQ V1 問答集、Knowledge V3 知識庫各測一輪 CRUD）。設計上測完會自動清除，且建立的測試資料標題都會標成 `[agent-test] ...` 方便辨識；但這終究是會動到 live 環境資料的操作，不像其他旗標是純讀取，跑之前想清楚指向的是哪個環境。
+⚠️ **`--live-write` 會真的建立、修改、刪除資料**，目前涵蓋六組測試：Chat V2 對話、FAQ V1 問答集、FAQ V1 問答集底下的問與答 entry、Knowledge V3 知識庫、Knowledge V3 知識庫底下的文件、FedFlow V1 的 flow 執行。設計上測完會自動清除，建立的測試資料標題都會標成 `[agent-test] ...` 方便辨識，但這終究是會動到 live 環境資料的操作，跑之前想清楚指向的是哪個環境。兩個例外要特別注意：
+- **Knowledge V3 文件測試**會實際走 Asset V2 的上傳流程，上傳的測試檔案**永久留在 storage、無法清除**（Asset V2 本身沒有查詢或刪除端點）——這是已知且接受的殘留，不是 bug。
+- **FedFlow execute 測試**是真的觸發一次 flow 執行，**沒有回溯機制**。預設打的是 stg2 上一個已人工確認無副作用的 flow，換一顆 flow 前務必先確認清楚它的實際行為。
 
 ### 報告在哪裡看
 每次執行都會在 `reports/`（已加進 `.gitignore`）產生一份帶時間戳的 HTML 檔案，直接用瀏覽器開就能看。這個資料夾只在本機，不會自動分享出去——目前要讓其他人也能看到報告，是透過 Claude Code session 手動發布成一個連結（用 Artifact 工具），不是這個 repo 自帶的功能。
@@ -199,15 +202,24 @@ Agent 能檢查出「這裡沒寫 description」，但**不負責猜測正確的
 
 ## 7. 擴大 Live Call 到寫入方法（POST/PUT/DELETE）
 
-跟 PM 討論後拍板：「有對外的 API 都要檢查」不只是指涵蓋所有 endpoint，也指檢查方法本身要全面，不能只做唯讀。目前 `agent/live_call.py` 只打 GET，這節記錄擴大範圍前需要先解決的問題（**尚未開始實作**）。
+跟 PM 討論後拍板：「有對外的 API 都要檢查」不只是指涵蓋所有 endpoint，也指檢查方法本身要全面，不能只做唯讀。`agent/live_call.py` 只打 GET；寫入方法的測試在 `agent/live_write_test.py`，透過 `--live-write` 啟用。
 
-**跟唯讀 GET 的差異**：GET 沒有副作用，打錯了頂多多讀一次；POST/PUT/DELETE 會真的在 dev 環境建立、修改、刪除資料，出錯的代價完全不同，不能照抄現在的做法直接套用。
+**測試資料隔離／清理策略（已定案並實作）**：所有測試資料的名稱/標題都以 `[agent-test]` 開頭方便辨識；每組測試都是「建立 → GET 驗證 → 修改 → GET 驗證 → 刪除 → GET 驗證真的刪了」的完整閉環，只要有明確的資源 ID 就會嘗試清乾淨，不論中途驗證步驟是否有失敗；只有在建立本身就失敗、拿不到 ID 的情況下才會整組放棄（因為根本沒建立任何東西）。
 
-**開始實作前要先定案的事**：
-- **測試資料隔離**：要不要用一個專門的測試帳號/命名慣例（例如標題都以 `[agent-test]` 開頭），方便事後辨識、清理，也避免跟真人使用者的資料混在一起。
-- **清理策略**：每輪跑完是不是要把自己建立的資料刪掉？如果 DELETE 本身也在測試範圍內，刪除動作要怎麼驗證又不留下垃圾資料。
-- **跨 endpoint 的先後依賴**：像 Chat V2 要「建立對話 → 查詢 → 更新標題 → （目前沒有刪除端點）」串成一條流程，才測得到 PUT；FedFlow、Knowledge 等其他分頁也要各自盤點適合的流程順序。
-- **哪些 endpoint 先做**：建議先挑「有對應 GET 可以驗證結果」的 POST/PUT（例如建立後可以馬上 GET 回來比對），比「打了看不到結果」的更容易驗證，先從這類開始。
+**目前已涵蓋（六組）**：
+- Chat V2 對話（`run_conversation_crud_test`）
+- FAQ V1 問答集容器（`run_faq_crud_test`）與底下的問與答 entry（`run_faq_entry_crud_test`，entry 掛在臨時建立的父層容器下測試）
+- Knowledge V3 知識庫容器（`run_knowledge_crud_test`）與底下的文件（`run_knowledge_document_crud_test`，會真的走 Asset V2 上傳流程，見上方使用說明的警語）
+- FedFlow V1 的 flow 執行（`run_fedflow_execute_test`，沒有 DELETE、無法復原，固定打一個已人工確認安全的 flow，見 `FEDFLOW_TEST_FLOW_ID`）
+
+**測試中意外發現的 spec 正確性問題**：`DELETE /knowledge/v3/knowledges/{knowledgeId}` 文件寫著「⚠️ 底下的文件會一起消失，而且無法復原」，但實測（`run_knowledge_document_crud_test` 會在文件仍存在時主動嘗試刪一次容器來驗證）發現知識庫必須先清空文件才能刪除，兩者不一致——已記錄成報告裡的 `spec_description_mismatch` finding，待確認是要修文件描述還是修實作行為。
+
+**尚未涵蓋、需要另外拍板的部分**：
+- **Auth V2 `/apikeys`**：建立真的 API 憑證，風險等級跟其他資源不同，需要另外確認才能測。
+- **Helix V1 `/voices`（語音註冊）**：需要真的語音檔案，目前沒有現成測試音檔。
+- **Asura V1 TTS / transcriptions**：TTS 是否會持久化資源待確認；transcriptions 沒有 DELETE、會動到其他使用者資料，暫不列入。
+- **Admin V1**：管理員權限端點，會動到其他使用者資料，暫不列入。
+- **Chat V2 的訊息與對話類端點**（`/conversations/{convId}/messages`、`chat/normal` 等）：會真的呼叫 LLM，有成本與延遲考量，且不是「建立可刪除資源」的模式，跟目前架構不同。
 
 ---
 
@@ -218,7 +230,7 @@ Agent 能檢查出「這裡沒寫 description」，但**不負責猜測正確的
 2.「跟上次執行比對」取代 3.10 baseline（見 3.2 節）。
 3. Jira 開票的目標 project、issue type、必填欄位規則。
 4. HTML report 的呈現內容與對象（給 PJM 看？給開發看？）。
-5. ~~Live call 驗證（第二階段）的啟動時機與範圍~~ — 已啟動 GET 部分並實測 dev 環境，抓到 3 類真實的文件/行為落差（`Conversation.disabled` 必填但實際回應沒有、`mode` 出現未宣告的值 `assistant`、`FAQ.description` 必填但實際缺漏）。**新待確認**：PM 已拍板要擴大到 POST/PUT/DELETE（見第 7 節），但測試資料隔離/清理策略還沒定案，這點要先講好才能動工。
+5. ~~Live call 驗證（第二階段）的啟動時機與範圍~~ — 已啟動 GET 部分並實測 dev/stg2 環境，也已擴大到 POST/PUT/DELETE（見第 7 節，六組寫入測試全部驗證通過）。累積抓到的真實文件/行為落差：`Conversation.disabled` 必填但實際回應沒有、`mode` 出現未宣告的值 `assistant`、`FAQ.description` 必填但實際缺漏、`DELETE /knowledges/{knowledgeId}` 文件寫「文件會一起消失」但實測要先清空文件才能刪除。**新待確認**：第 7 節列出的剩餘端點（Auth V2 apikeys、Helix V1 語音、Asura V1 TTS/transcriptions、Admin V1、Chat V2 訊息類）要不要測、怎麼測，需要再拍板。
 6. CI / 排程整合的時間點——現在有了「跟上次執行比對」的機制後，這點變得更重要：要多久固定跑一次，才不會讓兩次執行之間累積太多變化，待後續討論再定案。
 
 ---
