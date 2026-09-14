@@ -3,6 +3,51 @@
 > 來源：[FEDGPT-15990](https://ailabstw.atlassian.net/browse/FEDGPT-15990) 請 QA 測試 Public API
 > 狀態：草稿，待與 James Yang discuss & review 後正式謄寫為 Confluence
 
+### 這是什麼
+一個檢查 FedGPT Public Swagger 的小工具：靜態比對 spec 本身、對 GET/POST/PUT/DELETE 端點做 live call、追蹤 spec 隨時間的變化、用 LLM 審查文件寫得清不清楚，最後產出一份 HTML 報告。
+
+### 安裝
+```bash
+git clone <repo>
+cd SwaggerAgent
+pip install -r requirements.txt
+```
+
+### 設定 `.env`
+在專案根目錄建立 `.env`（已加進 `.gitignore`，不會進版控），依需要填入：
+
+| 變數 | 用途 | 從哪裡拿 |
+|---|---|---|
+| `FEDGPT_ACCESS_TOKEN` | live call 打 **dev** 環境要用的 token | 跟熟悉 dev 帳號的人要一組 access token |
+| `FEDGPT_STG2_TOKEN` | live call 打 **stg2** 環境要用的 token | 同上，但要 stg2 環境的帳號——**兩邊 token 不能互通**，各環境帳號資料庫是分開的 |
+| `GOOGLE_CHAT_WEBHOOK_URL` | `--notify` 推播用 | 目標 Google Chat Space → Apps & integrations → Webhooks |
+| `TEAMS_WEBHOOK_URL` | `--notify-teams` 推播用 | Teams 頻道/對話 → Workflows → 建一個 "When a Teams webhook request is received" 的 flow |
+
+### 基本用法
+```bash
+python run_check.py                    # 只做靜態比對 + 跟上次執行的 spec diff（不需要 token）
+python run_check.py --local swagger-spec   # 離線模式，吃本機存的 YAML 快照，不連網
+python run_check.py --live              # 加上對 GET 端點的 live call（唯讀，需要 token）
+python run_check.py --live-write        # 加上 POST/PUT/DELETE 測試（見下方警語）
+python run_check.py --llm-check         # 加上 LLM 文字審查（會呼叫真的 LLM API，較慢）
+python run_check.py --notify            # 跑完推播摘要到 Google Chat
+python run_check.py --notify-teams      # 跑完推播摘要到 Microsoft Teams
+python run_check.py --no-diff           # 不跟上次執行比對（預設會比對並更新快照）
+python run_check.py --base-url https://fedgpt-stg2-vm1.corp.ailabs.tw/swagger/docs --token <stg2 token>
+```
+以上旗標可以自由組合。想固定測 stg2 的話，直接用 [test_stg2.ps1](test_stg2.ps1)：
+```powershell
+.\test_stg2.ps1                  # 等同 --live，指向 stg2，自動吃 FEDGPT_STG2_TOKEN
+.\test_stg2.ps1 --notify-teams   # 後面接的參數都會轉給 run_check.py
+```
+
+⚠️ **`--live-write` 會真的建立、修改、刪除資料**（Chat V2 對話、FAQ V1 問答集、Knowledge V3 知識庫各測一輪 CRUD）。設計上測完會自動清除，且建立的測試資料標題都會標成 `[agent-test] ...` 方便辨識；但這終究是會動到 live 環境資料的操作，不像其他旗標是純讀取，跑之前想清楚指向的是哪個環境。
+
+### 報告在哪裡看
+每次執行都會在 `reports/`（已加進 `.gitignore`）產生一份帶時間戳的 HTML 檔案，直接用瀏覽器開就能看。這個資料夾只在本機，不會自動分享出去——目前要讓其他人也能看到報告，是透過 Claude Code session 手動發布成一個連結（用 Artifact 工具），不是這個 repo 自帶的功能。
+
+---
+
 ## 背景
 
 **不做人工逐一比對，改為建置一個 API Review Agent，自動依 Public Swagger 做檢查**。

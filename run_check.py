@@ -11,6 +11,7 @@
     python run_check.py --no-diff           # 不跟上次執行的結果比對（預設會比對）
     python run_check.py --notify-teams      # 把摘要推到 Microsoft Teams（需要 TEAMS_WEBHOOK_URL）
     python run_check.py --llm-check         # 額外用 LLM 審查 description 寫得清不清楚、有沒有矛盾
+    python run_check.py --live-write        # 額外測 POST/PUT/DELETE（會建立/修改/刪除真的資料，測完自動清除）
 """
 
 import argparse
@@ -29,6 +30,7 @@ from agent.config import (
 )
 from agent.fetch import fetch_specs, load_local_specs
 from agent.live_call import run_live_get_checks
+from agent.live_write_test import run_conversation_crud_test, run_faq_crud_test, run_knowledge_crud_test
 from agent.llm_check import run_llm_checks
 from agent.report import render_html
 from agent.spec_diff import SNAPSHOT_DIR_DEFAULT, run_spec_diff
@@ -51,6 +53,11 @@ def main():
     parser.add_argument("--snapshot-dir", default=SNAPSHOT_DIR_DEFAULT, help="spec 基準快照存放資料夾")
     parser.add_argument(
         "--llm-check", action="store_true", help="額外用 LLM 審查 description 清不清楚、有沒有邏輯矛盾（會呼叫真的 LLM API，較慢）"
+    )
+    parser.add_argument(
+        "--live-write",
+        action="store_true",
+        help="額外測 POST/PUT/DELETE：Chat V2 對話、FAQ V1 問答集、Knowledge V3 知識庫各跑一輪建立/驗證/更新/驗證/刪除/驗證，測完會自動清除",
     )
     args = parser.parse_args()
 
@@ -90,6 +97,14 @@ def main():
         llm_findings = run_llm_checks(entries, api_base_url, args.token)
         print(f"LLM 審查共 {len(llm_findings)} 筆發現")
         findings.extend(llm_findings)
+
+    if args.live_write:
+        api_base_url = args.api_base_url or derive_api_base_url(args.base_url)
+        print(f"執行寫入方法測試（POST/PUT/DELETE）against {api_base_url} ...")
+        for run_test in (run_conversation_crud_test, run_faq_crud_test, run_knowledge_crud_test):
+            write_findings = run_test(entries, api_base_url, args.token)
+            findings.extend(write_findings)
+        print(f"寫入方法測試共 {sum(1 for f in findings if f.get('phase') == 'live_write')} 筆發現")
 
     os.makedirs(args.output_dir, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
