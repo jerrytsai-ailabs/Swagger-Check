@@ -21,6 +21,7 @@ pip install -r requirements.txt
 | `FEDGPT_ACCESS_TOKEN` | live call 打 **dev** 環境要用的 token | 跟熟悉 dev 帳號的人要一組 access token |
 | `FEDGPT_STG2_TOKEN` | live call 打 **stg2** 環境要用的 token | 同上，但要 stg2 環境的帳號——**兩邊 token 不能互通**，各環境帳號資料庫是分開的 |
 | `FEDFLOW_TEST_FLOW_ID` | `--live-write` 測 FedFlow execute 要打的 flow id | 選填，預設是 stg2 上一個已人工確認「無副作用」的 flow（`212913c58069778f5f399a3f466d7ffc`，名稱 "Second"）。這個 flow 只存在於 stg2，對其他環境跑會直接跳過（回 404 視為無可用測試 flow） |
+| `HELIX_TEST_AUDIO_PATH` | `--live-write` 測 Helix 聲紋與 Asura 語音轉文字要用的本機音檔路徑 | 選填，指到一個本機真的音檔（測試中用的是 .aac）。沒有設定就跳過這兩組測試，不是失敗；路徑含空格或特殊字元時記得用引號包起來（`.env` 也會被 bash `source` 讀到，格式要兼顧） |
 | `GOOGLE_CHAT_WEBHOOK_URL` | `--notify` 推播用 | 目標 Google Chat Space → Apps & integrations → Webhooks |
 | `TEAMS_WEBHOOK_URL` | `--notify-teams` 推播用 | Teams 頻道/對話 → Workflows → 建一個 "When a Teams webhook request is received" 的 flow |
 
@@ -42,9 +43,10 @@ python run_check.py --base-url https://fedgpt-stg2-vm1.corp.ailabs.tw/swagger/do
 .\test_stg2.ps1 --notify-teams   # 後面接的參數都會轉給 run_check.py
 ```
 
-⚠️ **`--live-write` 會真的建立、修改、刪除資料**，目前涵蓋六組測試：Chat V2 對話、FAQ V1 問答集、FAQ V1 問答集底下的問與答 entry、Knowledge V3 知識庫、Knowledge V3 知識庫底下的文件、FedFlow V1 的 flow 執行。設計上測完會自動清除，建立的測試資料標題都會標成 `[agent-test] ...` 方便辨識，但這終究是會動到 live 環境資料的操作，跑之前想清楚指向的是哪個環境。兩個例外要特別注意：
-- **Knowledge V3 文件測試**會實際走 Asset V2 的上傳流程，上傳的測試檔案**永久留在 storage、無法清除**（Asset V2 本身沒有查詢或刪除端點）——這是已知且接受的殘留，不是 bug。
+⚠️ **`--live-write` 會真的建立、修改、刪除資料**，目前涵蓋 19 組測試（完整清單見第 7 節）。設計上測完會自動清除，建立的測試資料標題都會標成 `[agent-test] ...` 方便辨識，但這終究是會動到 live 環境資料的操作，跑之前想清楚指向的是哪個環境。幾個例外要特別注意：
+- **Knowledge V3 文件、Asura TTS/transcriptions 測試**會實際走 Asset V2 或 Asura 自己的上傳流程，上傳的測試檔案**永久留在 storage、無法清除**（這幾支 API 本身沒有查詢或刪除端點）——這是已知且接受的殘留，不是 bug。Asura transcriptions 連工作紀錄本身也沒有 DELETE，一樣永久留著。
 - **FedFlow execute 測試**是真的觸發一次 flow 執行，**沒有回溯機制**。預設打的是 stg2 上一個已人工確認無副作用的 flow，換一顆 flow 前務必先確認清楚它的實際行為。
+- **Chat V2 相關測試**（送訊息、四個 mode、串流版本）會真的呼叫一次 LLM，有實際的 API 用量／成本。
 
 ### 報告在哪裡看
 每次執行都會在 `reports/`（已加進 `.gitignore`）產生一份帶時間戳的 HTML 檔案，直接用瀏覽器開就能看。這個資料夾只在本機，不會自動分享出去——目前要讓其他人也能看到報告，是透過 Claude Code session 手動發布成一個連結（用 Artifact 工具），不是這個 repo 自帶的功能。
@@ -206,20 +208,29 @@ Agent 能檢查出「這裡沒寫 description」，但**不負責猜測正確的
 
 **測試資料隔離／清理策略（已定案並實作）**：所有測試資料的名稱/標題都以 `[agent-test]` 開頭方便辨識；每組測試都是「建立 → GET 驗證 → 修改 → GET 驗證 → 刪除 → GET 驗證真的刪了」的完整閉環，只要有明確的資源 ID 就會嘗試清乾淨，不論中途驗證步驟是否有失敗；只有在建立本身就失敗、拿不到 ID 的情況下才會整組放棄（因為根本沒建立任何東西）。
 
-**目前已涵蓋（六組）**：
-- Chat V2 對話（`run_conversation_crud_test`）
+**目前已涵蓋（19 組，全部驗證通過）**：
+- Chat V2 對話（`run_conversation_crud_test`）、送訊息（`run_chat_send_message_test`）、四個資源型 mode（`run_chat_knowledge_mode_test`／`run_chat_agentic_rag_mode_test`／`run_chat_faq_mode_test`／`run_chat_tabular_mode_test`）、送訊息的串流版本（`run_chat_normal_stream_test`，SSE 方言 A）
 - FAQ V1 問答集容器（`run_faq_crud_test`）與底下的問與答 entry（`run_faq_entry_crud_test`，entry 掛在臨時建立的父層容器下測試）
 - Knowledge V3 知識庫容器（`run_knowledge_crud_test`）與底下的文件（`run_knowledge_document_crud_test`，會真的走 Asset V2 上傳流程，見上方使用說明的警語）
 - FedFlow V1 的 flow 執行（`run_fedflow_execute_test`，沒有 DELETE、無法復原，固定打一個已人工確認安全的 flow，見 `FEDFLOW_TEST_FLOW_ID`）
+- Helix V1 的獨立聲紋 `/voices`（`run_helix_voice_crud_test`，需要 `HELIX_TEST_AUDIO_PATH` 指到本機真的音檔）
+- Auth V2（`run_auth_apikey_crud_test`）與 Admin V1（`run_admin_apikey_crud_test`，只操作測試帳號自己的 userId，不碰其他使用者）的 API key CRUD
+- LLM V1 的 embeddings（`run_llm_embeddings_test`）
+- Asura V1 的文字轉語音（`run_asura_tts_test`）、語音轉文字（`run_asura_transcription_test`，沒有 DELETE，工作紀錄永久留存）、即時轉錄連線 token（`run_asura_neartime_token_test`，只驗證取得憑證的契約，不實際連 WebSocket）
 
-**測試中意外發現的 spec 正確性問題**：`DELETE /knowledge/v3/knowledges/{knowledgeId}` 文件寫著「⚠️ 底下的文件會一起消失，而且無法復原」，但實測（`run_knowledge_document_crud_test` 會在文件仍存在時主動嘗試刪一次容器來驗證）發現知識庫必須先清空文件才能刪除，兩者不一致——已記錄成報告裡的 `spec_description_mismatch` finding，待確認是要修文件描述還是修實作行為。
+**測試過程中意外發現的 spec 正確性問題**（都已記錄成報告裡的 `spec_description_mismatch` 或 `undocumented_status_code` finding）：
+- `DELETE /knowledge/v3/knowledges/{knowledgeId}` 文件寫「底下的文件會一起消失」，實測要先清空文件才能刪除（回 423，且未宣告這個狀態碼）
+- `POST /helix/v1/voices` 的 `audioUris` 文件建議走 Asset V2 上傳取網址，但 Asset V2 給的是 `assetKey` 不是網址，直接送出去實際回 502（未宣告）
+- `FedFlow` 執行結果的 `state` 出現未宣告的 `PENDING`
+- Asura TTS 的 `SpeechModelConfig.model` 範例值在 stg2 不存在，且沒有任何端點可查詢正確的模型名稱清單
+- Asura TTS 的 `audioConfig` 文件寫選填，實測是必填
+- `chat/knowledge` 對一個沒有索引內容的知識庫送訊息會回 404，但文件的 404 成因列表沒提到這種情況；且與 `agentic-rag`「同一套 params 規則」的說法不同，`agentic-rag` 對空知識庫沒有這個限制
+- `GET /chat/v2/tabulars` 沒有任何欄位可以判斷資源是否「ready for query」，實測部分既有資源會在送訊息時回 423（未宣告）
 
-**尚未涵蓋、需要另外拍板的部分**：
-- **Auth V2 `/apikeys`**：建立真的 API 憑證，風險等級跟其他資源不同，需要另外確認才能測。
-- **Helix V1 `/voices`（語音註冊）**：需要真的語音檔案，目前沒有現成測試音檔。
-- **Asura V1 TTS / transcriptions**：TTS 是否會持久化資源待確認；transcriptions 沒有 DELETE、會動到其他使用者資料，暫不列入。
-- **Admin V1**：管理員權限端點，會動到其他使用者資料，暫不列入。
-- **Chat V2 的訊息與對話類端點**（`/conversations/{convId}/messages`、`chat/normal` 等）：會真的呼叫 LLM，有成本與延遲考量，且不是「建立可刪除資源」的模式，跟目前架構不同。
+**尚未涵蓋**：
+- **Helix V1 `/enrollment`**：帳號已有真實註冊，不能碰，維持跳過。
+- **LLM V1 visual completions**：需要一個 FedGPT 連得到的公開圖片網址，若部署環境有出網限制可能因網路問題失敗，尚待決定要不要測。
+- **Chat V2 其餘 4 個 mode 的 `:stream` 版本**：SSE 解析架構已經用 `chat/normal:stream` 驗證過，重複測邊際效益低，暫不列入。
 
 ---
 
@@ -230,7 +241,7 @@ Agent 能檢查出「這裡沒寫 description」，但**不負責猜測正確的
 2.「跟上次執行比對」取代 3.10 baseline（見 3.2 節）。
 3. Jira 開票的目標 project、issue type、必填欄位規則。
 4. HTML report 的呈現內容與對象（給 PJM 看？給開發看？）。
-5. ~~Live call 驗證（第二階段）的啟動時機與範圍~~ — 已啟動 GET 部分並實測 dev/stg2 環境，也已擴大到 POST/PUT/DELETE（見第 7 節，六組寫入測試全部驗證通過）。累積抓到的真實文件/行為落差：`Conversation.disabled` 必填但實際回應沒有、`mode` 出現未宣告的值 `assistant`、`FAQ.description` 必填但實際缺漏、`DELETE /knowledges/{knowledgeId}` 文件寫「文件會一起消失」但實測要先清空文件才能刪除。**新待確認**：第 7 節列出的剩餘端點（Auth V2 apikeys、Helix V1 語音、Asura V1 TTS/transcriptions、Admin V1、Chat V2 訊息類）要不要測、怎麼測，需要再拍板。
+5. ~~Live call 驗證（第二階段）的啟動時機與範圍~~ — 已啟動 GET 部分並實測 dev/stg2 環境，也已擴大到 POST/PUT/DELETE（見第 7 節，19 組寫入測試全部驗證通過，涵蓋 Chat/FAQ/Knowledge/FedFlow/Helix/Auth/Admin/LLM/Asura）。累積抓到的真實文件/行為落差列在第 7 節。**新待確認**：剩下沒測的三項（Helix enrollment、LLM visual completions、Chat 其餘 mode 的 stream 版本）要不要補測，見第 7 節說明的理由。
 6. CI / 排程整合的時間點——現在有了「跟上次執行比對」的機制後，這點變得更重要：要多久固定跑一次，才不會讓兩次執行之間累積太多變化，待後續討論再定案。
 
 ---
