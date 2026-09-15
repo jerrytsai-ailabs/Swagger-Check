@@ -53,6 +53,10 @@ FEDFLOW_TEST_FLOW_ID = os.environ.get("FEDFLOW_TEST_FLOW_ID", "212913c58069778f5
 # 沒有設定或檔案不存在就跳過這個測試（視為未設置，不是失敗）。
 HELIX_TEST_AUDIO_PATH = os.environ.get("HELIX_TEST_AUDIO_PATH", "")
 
+# /enrollment 是「一個帳號只能有一組」的資源，不能用主要測試帳號測（可能已經有真實註冊）。
+# 這裡用一個獨立的、確認過從沒註冊過聲紋的專用測試帳號 token，沒有設定就跳過這個測試。
+HELIX_ENROLLMENT_TEST_TOKEN = os.environ.get("HELIX_ENROLLMENT_TEST_TOKEN", "")
+
 
 def derive_api_base_url(swagger_docs_base_url):
     """從 swagger docs 的 base URL 推回實際打 API 要用的 origin + /api。

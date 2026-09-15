@@ -2972,3 +2972,195 @@ def run_llm_visual_completions_test(entries, api_base_url, token, timeout=60):
         findings.append(_finding("live_write_ok", "info", filename, group, "visual completions 呼叫成功，收到模型對測試圖片的描述回應"))
 
     return findings
+
+
+def run_helix_enrollment_test(entries, api_base_url, token, timeout=60):
+    """測試 Helix V1 的 `/enrollment`（帳號自己的聲紋，一個帳號限一組）。
+
+    這個資源的限制跟 `/voices` 完全不同：**一個帳號只能有一組**，而且已知主要測試帳號
+    有真實註冊，不能拿來測（會被 409 擋下，就算沒被擋也絕不該碰）。所以這裡固定使用一個
+    獨立的、確認過從沒註冊過聲紋的專用測試帳號（`config.HELIX_ENROLLMENT_TEST_TOKEN`），
+    完全不會用到參數傳進來的 `token`（那是主要測試帳號的，留著只是為了跟其他 run_* 函式
+    的呼叫介面一致，方便 run_check.py 統一迭代呼叫）——沒有設定這個環境變數就跳過測試，
+    不是失敗。
+
+    即使用的是專用帳號，第一步仍然會先 `GET` 確認真的還沒註冊過，不會假設環境變數設定
+    正確就直接動手：如果這個帳號不知何故已經有註冊，一樣直接跳過、不嘗試刪除重建。
+    """
+    from .config import HELIX_ENROLLMENT_TEST_TOKEN, HELIX_TEST_AUDIO_PATH
+
+    findings = []
+    filename, group = "helix-v1.yaml", "Helix V1"
+
+    if not HELIX_ENROLLMENT_TEST_TOKEN:
+        findings.append(_finding("live_write_skipped", "info", filename, group, "沒有設定 HELIX_ENROLLMENT_TEST_TOKEN，跳過 /enrollment 測試（不會用主要測試帳號測這個端點）"))
+        return findings
+
+    if not HELIX_TEST_AUDIO_PATH or not os.path.isfile(HELIX_TEST_AUDIO_PATH):
+        findings.append(_finding("live_write_skipped", "info", filename, group, "沒有設定 HELIX_TEST_AUDIO_PATH 或檔案不存在，跳過 /enrollment 測試"))
+        return findings
+
+    entry = next((e for e in entries if e.get("filename") == filename and e.get("spec")), None)
+    if not entry:
+        findings.append(_finding("live_write_skipped", "info", filename, group, f"找不到 {filename} 的 spec，跳過寫入測試"))
+        return findings
+
+    spec = entry["spec"]
+    paths = spec.get("paths") or {}
+
+    def op_of(path, method):
+        op = paths[path][method]
+        op["__spec__"] = spec
+        return op
+
+    enrollment_path = "/public/helix/v1/enrollment"
+
+    session = requests.Session()
+    session.headers.update({"X-Access-Token": HELIX_ENROLLMENT_TEST_TOKEN, "Content-Type": "application/json"})
+    base = api_base_url.rstrip("/")
+
+    # Step 0：確認這個專用測試帳號真的還沒註冊過，不假設環境變數設定正確
+    try:
+        resp = session.get(f"{base}{enrollment_path}", timeout=timeout)
+    except requests.RequestException as exc:
+        findings.append(_finding("live_write_error", "error", filename, group, f"GET 查詢註冊狀態失敗：{exc}", path=enrollment_path, method="GET"))
+        return findings
+
+    ok = _check_status_and_schema(op_of(enrollment_path, "get"), resp, findings, filename, group, enrollment_path, "get")
+    if not ok or resp.status_code != 200:
+        findings.append(_finding("live_write_aborted", "error", filename, group, f"GET 查詢註冊狀態沒有回 200（實際 {resp.status_code}），中止測試", path=enrollment_path, method="GET"))
+        return findings
+
+    try:
+        already_enrolled = resp.json().get("enrolled")
+    except ValueError:
+        findings.append(_finding("live_write_aborted", "error", filename, group, "GET 查詢註冊狀態回應不是合法 JSON，中止測試", path=enrollment_path, method="GET"))
+        return findings
+
+    if already_enrolled:
+        findings.append(
+            _finding("live_write_skipped", "info", filename, group, "這個專用測試帳號已經有註冊（enrolled: true），不符合預期，直接跳過、不嘗試刪除重建", path=enrollment_path, method="GET")
+        )
+        return findings
+
+    # Step 1：presign + 上傳音檔
+    test_filename = "[agent-test]-" + os.path.basename(HELIX_TEST_AUDIO_PATH)
+    content_type = "audio/aac"
+    with open(HELIX_TEST_AUDIO_PATH, "rb") as fh:
+        audio_bytes = fh.read()
+
+    asset_key = _asset_v2_presign_and_upload(session, base, timeout, findings, filename=test_filename, content_type=content_type, content=audio_bytes)
+    if not asset_key:
+        return findings
+
+    # Step 2：註冊聲紋
+    try:
+        resp = session.post(f"{base}{enrollment_path}", json={"audioKeys": [asset_key]}, timeout=timeout)
+    except requests.RequestException as exc:
+        findings.append(_finding("live_write_error", "error", filename, group, f"POST 註冊聲紋失敗：{exc}", path=enrollment_path, method="POST"))
+        return findings
+
+    if resp.status_code == 409:
+        findings.append(
+            _finding(
+                "live_write_skipped",
+                "info",
+                filename,
+                group,
+                "POST 註冊回 409（data.unique，帳號已註冊過）——跟 Step 0 的 GET 結果矛盾，可能是併發註冊，直接跳過不處理",
+                path=enrollment_path,
+                method="POST",
+            )
+        )
+        return findings
+
+    ok = _check_status_and_schema(op_of(enrollment_path, "post"), resp, findings, filename, group, enrollment_path, "post")
+    if not ok or resp.status_code != 200:
+        if "MULTIPLE_SPEAKERS" in resp.text:
+            findings.append(
+                _finding(
+                    "live_write_skipped",
+                    "info",
+                    filename,
+                    group,
+                    f"測試音檔偵測到多位說話者（{resp.text[:200]}），/enrollment 需要單一穩定說話者的錄音，這是合理的業務驗證、不是 API 問題——需要換一段單人語音的測試音檔才能完整測試這條路徑",
+                    path=enrollment_path,
+                    method="POST",
+                )
+            )
+            return findings
+        try:
+            error_body = resp.json()
+            if resp.status_code == 400 and not error_body.get("service") and not error_body.get("reason"):
+                findings.append(
+                    _finding(
+                        "spec_description_mismatch",
+                        "warning",
+                        filename,
+                        group,
+                        f"這個 400 回應的 service/reason 都是空字串（message={error_body.get('message')!r}），不符合 Error schema 說明的『reason 是必填、程式請用這個欄位做分支』——這種錯誤沒辦法照文件教的方式判斷成因",
+                        path=enrollment_path,
+                        method="POST",
+                    )
+                )
+        except ValueError:
+            pass
+        findings.append(
+            _finding("live_write_aborted", "error", filename, group, f"POST 註冊聲紋沒有回 200（實際 {resp.status_code}）：{resp.text[:300]}，中止測試", path=enrollment_path, method="POST")
+        )
+        return findings
+
+    try:
+        voice_id = resp.json()["voiceId"]
+    except Exception as exc:  # noqa: BLE001
+        findings.append(_finding("live_write_aborted", "error", filename, group, f"POST 回應裡拿不到 voiceId：{exc}", path=enrollment_path, method="POST"))
+        return findings
+
+    # Step 3：GET 驗證註冊成功
+    try:
+        resp = session.get(f"{base}{enrollment_path}", timeout=timeout)
+        body = resp.json()
+        if not body.get("enrolled"):
+            findings.append(_finding("live_write_data_mismatch", "error", filename, group, f"註冊成功後 GET 卻回 enrolled: {body.get('enrolled')}", path=enrollment_path, method="GET"))
+        elif body.get("voiceId") != voice_id:
+            findings.append(
+                _finding("live_write_data_mismatch", "error", filename, group, f"GET 回來的 voiceId（{body.get('voiceId')}）跟 POST 回應的（{voice_id}）不一致", path=enrollment_path, method="GET")
+            )
+    except requests.RequestException as exc:
+        findings.append(_finding("live_write_error", "error", filename, group, f"GET 驗證註冊結果失敗：{exc}", path=enrollment_path, method="GET"))
+
+    # Step 4：刪除，恢復成未註冊狀態
+    delete_ok = False
+    try:
+        resp = session.delete(f"{base}{enrollment_path}", timeout=timeout)
+        delete_ok = _check_status_and_schema(op_of(enrollment_path, "delete"), resp, findings, filename, group, enrollment_path, "delete")
+        delete_ok = delete_ok and resp.status_code == 200
+    except requests.RequestException as exc:
+        findings.append(_finding("live_write_cleanup_failed", "error", filename, group, f"DELETE 刪除註冊失敗：{exc}，voiceId={voice_id} 需要手動清理", path=enrollment_path, method="DELETE"))
+
+    # Step 5：GET 驗證恢復成未註冊
+    if delete_ok:
+        try:
+            resp = session.get(f"{base}{enrollment_path}", timeout=timeout)
+            body = resp.json()
+            if body.get("enrolled"):
+                findings.append(
+                    _finding("live_write_cleanup_failed", "error", filename, group, f"DELETE 回 200，但 GET 還是 enrolled: true，voiceId={voice_id} 可能沒有真的清除", path=enrollment_path, method="GET")
+                )
+        except requests.RequestException as exc:
+            findings.append(_finding("live_write_error", "warning", filename, group, f"GET 驗證刪除結果失敗：{exc}", path=enrollment_path, method="GET"))
+
+    findings.append(
+        _finding(
+            "live_write_permanent_residue",
+            "info",
+            filename,
+            group,
+            f"spec 明講送進來的錄音會被永久保存，即使已經 DELETE 恢復成未註冊狀態，底層錄音本身是否真的清除文件沒有講清楚——這是已知且無法確認的潛在殘留",
+        )
+    )
+
+    if not any(f["rule"].startswith("live_write_") and f["severity"] == "error" for f in findings):
+        findings.append(_finding("live_write_ok", "info", filename, group, f"專用測試帳號的 POST 註冊 → GET 驗證 → DELETE → GET 驗證清空全部驗證通過（voiceId={voice_id}）"))
+
+    return findings
