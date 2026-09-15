@@ -37,11 +37,15 @@ from agent.live_write_test import (
     run_asura_tts_test,
     run_auth_apikey_crud_test,
     run_chat_agentic_rag_mode_test,
+    run_chat_agentic_rag_stream_test,
     run_chat_faq_mode_test,
+    run_chat_faq_stream_test,
     run_chat_knowledge_mode_test,
+    run_chat_knowledge_stream_test,
     run_chat_normal_stream_test,
     run_chat_send_message_test,
     run_chat_tabular_mode_test,
+    run_chat_tabular_stream_test,
     run_conversation_crud_test,
     run_faq_crud_test,
     run_faq_entry_crud_test,
@@ -50,6 +54,7 @@ from agent.live_write_test import (
     run_knowledge_crud_test,
     run_knowledge_document_crud_test,
     run_llm_embeddings_test,
+    run_llm_visual_completions_test,
 )
 from agent.llm_check import run_llm_checks
 from agent.report import render_html
@@ -142,6 +147,11 @@ def main():
             run_asura_transcription_test,
             run_asura_neartime_token_test,
             run_chat_normal_stream_test,
+            run_chat_knowledge_stream_test,
+            run_chat_agentic_rag_stream_test,
+            run_chat_faq_stream_test,
+            run_chat_tabular_stream_test,
+            run_llm_visual_completions_test,
         ):
             write_findings = run_test(entries, api_base_url, args.token)
             findings.extend(write_findings)

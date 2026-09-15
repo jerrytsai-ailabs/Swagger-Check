@@ -131,8 +131,16 @@ def _parse_sse_dialect_a(resp):
     last_data = None
     error_event = None
     pending_event = None
-    for raw_line in resp.iter_lines(decode_unicode=True):
-        if raw_line is None:
+    # 刻意不用 iter_lines(decode_unicode=True)：requests 會在還沒把網路封包重組成完整一行
+    # 之前就先解碼，中文字的 UTF-8 多位元組序列如果剛好被切在兩個封包中間會解碼壞掉，甚至
+    # 誤判出多餘的換行，把一則 data: 硬生生切成兩行。改成先用原始 bytes 分行（\n 在 UTF-8
+    # 裡永遠是安全的分割點，不會出現在多位元組字元中間），每一行湊齊之後再自己解碼。
+    for raw_bytes in resp.iter_lines():
+        if raw_bytes is None:
+            continue
+        try:
+            raw_line = raw_bytes.decode("utf-8")
+        except UnicodeDecodeError:
             continue
         line = raw_line.rstrip("\r")
         if line == "":
@@ -2689,5 +2697,278 @@ def run_chat_normal_stream_test(entries, api_base_url, token, timeout=90):
 
     if not any(f["rule"].startswith("live_write_") and f["severity"] == "error" for f in findings):
         findings.append(_finding("live_write_ok", "info", filename, group, f"串流送訊息 → 解析累積內容 → 刪除臨時對話全部驗證通過（convId={conv_id}）"))
+
+    return findings
+
+
+def _run_chat_mode_stream_test(entries, api_base_url, token, timeout, *, mode, chat_stream_path, mode_label, prepare_params_fn):
+    """`_run_chat_mode_test` 的串流版本：建立臨時對話 → SSE 方言 A 送訊息 → 刪除對話。
+
+    `knowledge`/`agentic-rag`/`faq`/`tabular` 這幾個 mode 的 `:stream` 端點都共用這個流程，
+    prepare_params_fn 的用法跟 `_run_chat_mode_test` 完全一致（可以直接共用同一批函式）。
+    """
+    findings = []
+    filename, group = "chat-v2.yaml", "Chat V2"
+    entry = next((e for e in entries if e.get("filename") == filename and e.get("spec")), None)
+    if not entry:
+        findings.append(_finding("live_write_skipped", "info", filename, group, f"找不到 {filename} 的 spec，跳過寫入測試"))
+        return findings
+
+    spec = entry["spec"]
+    paths = spec.get("paths") or {}
+
+    def op_of(path, method):
+        op = paths[path][method]
+        op["__spec__"] = spec
+        return op
+
+    conversations_path = "/public/chat/v2/conversations"
+    conversation_item_path_template = "/public/chat/v2/conversations/{convId}"
+    models_path = "/public/chat/v2/models"
+
+    session = requests.Session()
+    session.headers.update({"X-Access-Token": token, "Content-Type": "application/json"})
+    base = api_base_url.rstrip("/")
+
+    try:
+        resp = session.get(f"{base}{models_path}", timeout=timeout)
+        resp.raise_for_status()
+        models = resp.json().get("models") or []
+        if not models:
+            findings.append(_finding("live_write_error", "error", filename, group, "GET /models 沒有回傳任何模型，無法建立測試對話", path=models_path, method="GET"))
+            return findings
+        model_id = models[0]["id"]
+    except Exception as exc:  # noqa: BLE001
+        findings.append(_finding("live_write_error", "error", filename, group, f"取得模型清單失敗：{exc}", path=models_path, method="GET"))
+        return findings
+
+    params, cleanup_fn = prepare_params_fn(session, base, timeout, findings)
+    if params is None:
+        return findings
+
+    conv_id = None
+    try:
+        try:
+            resp = session.post(
+                f"{base}{conversations_path}",
+                json={"conversation": {"title": TEST_TITLE, "mode": mode, "model": model_id, "params": params}},
+                timeout=timeout,
+            )
+        except requests.RequestException as exc:
+            findings.append(_finding("live_write_error", "error", filename, group, f"POST 建立測試對話失敗：{exc}", path=conversations_path, method="POST"))
+            return findings
+
+        if _is_permission_denied(resp):
+            findings.append(
+                _finding("live_write_skipped", "info", filename, group, f"測試帳號沒有這個 mode（{mode_label}）所需資源的 chat 權限（{resp.status_code}），跳過這組測試", path=conversations_path, method="POST")
+            )
+            return findings
+
+        ok = _check_status_and_schema(op_of(conversations_path, "post"), resp, findings, filename, group, conversations_path, "post")
+        if not ok or resp.status_code != 200:
+            findings.append(
+                _finding("live_write_aborted", "error", filename, group, f"POST 建立 {mode_label} 對話沒有回 200（實際 {resp.status_code}），中止測試", path=conversations_path, method="POST")
+            )
+            return findings
+
+        try:
+            conv_id = resp.json()["conversation"]["convId"]
+        except Exception as exc:  # noqa: BLE001
+            findings.append(_finding("live_write_aborted", "error", filename, group, f"POST 回應裡拿不到 convId，中止測試：{exc}", path=conversations_path, method="POST"))
+            return findings
+
+        conversation_item_path = conversation_item_path_template.replace("{convId}", conv_id)
+
+        # 送一則訊息，SSE 串流回應
+        try:
+            resp = session.post(
+                f"{base}{chat_stream_path}",
+                json={"convId": conv_id, "message": {"text": f"[agent-test] live-call chat {mode_label} 串流驗證，請用一句話簡短回覆"}},
+                timeout=timeout,
+                stream=True,
+            )
+            if resp.status_code != 200:
+                findings.append(
+                    _finding(
+                        "live_write_aborted",
+                        "error",
+                        filename,
+                        group,
+                        f"POST 串流送訊息（{mode_label}）沒有回 200（實際 {resp.status_code}），中止測試（仍會清理臨時資源）",
+                        path=chat_stream_path,
+                        method="POST",
+                    )
+                )
+            else:
+                content_type = resp.headers.get("Content-Type", "")
+                if "text/event-stream" not in content_type:
+                    findings.append(
+                        _finding("live_write_data_mismatch", "error", filename, group, f"回應 Content-Type 是 {content_type!r}，預期是 text/event-stream", path=chat_stream_path, method="POST")
+                    )
+                last_data, error_event = _parse_sse_dialect_a(resp)
+                if error_event:
+                    findings.append(_finding("live_write_aborted", "error", filename, group, f"串流中途收到 event: error：{error_event}", path=chat_stream_path, method="POST"))
+                elif not last_data:
+                    findings.append(_finding("live_write_data_mismatch", "error", filename, group, "串流結束但沒有收到任何 event: data", path=chat_stream_path, method="POST"))
+                else:
+                    if last_data.get("convId") != conv_id:
+                        findings.append(
+                            _finding(
+                                "live_write_data_mismatch",
+                                "error",
+                                filename,
+                                group,
+                                f"最後一則事件的 convId（{last_data.get('convId')}）跟送出的 convId（{conv_id}）不一致",
+                                path=chat_stream_path,
+                                method="POST",
+                            )
+                        )
+                    elif not last_data.get("messages"):
+                        findings.append(
+                            _finding("live_write_data_mismatch", "error", filename, group, "最後一則事件的 messages 是空的，預期至少有一則模型的回覆", path=chat_stream_path, method="POST")
+                        )
+        except requests.RequestException as exc:
+            findings.append(_finding("live_write_error", "error", filename, group, f"POST 串流送訊息（{mode_label}）失敗：{exc}", path=chat_stream_path, method="POST"))
+
+        # 清掉臨時對話
+        try:
+            resp = session.delete(f"{base}{conversation_item_path}", timeout=timeout)
+            delete_ok = _check_status_and_schema(op_of(conversation_item_path_template, "delete"), resp, findings, filename, group, conversation_item_path_template, "delete")
+        except requests.RequestException as exc:
+            findings.append(
+                _finding("live_write_cleanup_failed", "error", filename, group, f"DELETE 測試對話失敗：{exc}，convId={conv_id} 需要手動清理", path=conversation_item_path_template, method="DELETE")
+            )
+            delete_ok = False
+
+        if delete_ok:
+            try:
+                resp = session.get(f"{base}{conversation_item_path}", timeout=timeout)
+                if resp.status_code != 404:
+                    findings.append(
+                        _finding(
+                            "live_write_cleanup_failed",
+                            "error",
+                            filename,
+                            group,
+                            f"DELETE 測試對話回 200，但 GET 還是拿到 {resp.status_code}（預期 404），convId={conv_id} 可能沒有真的刪除",
+                            path=conversation_item_path_template,
+                            method="DELETE",
+                        )
+                    )
+            except requests.RequestException as exc:
+                findings.append(_finding("live_write_error", "warning", filename, group, f"GET 驗證刪除結果失敗：{exc}", path=conversation_item_path_template, method="GET"))
+    finally:
+        cleanup_fn()
+
+    if not any(f["rule"].startswith("live_write_") and f["severity"] == "error" for f in findings):
+        findings.append(_finding("live_write_ok", "info", filename, group, f"{mode_label} 模式的串流送訊息 → 解析累積內容 → 刪除臨時對話全部驗證通過（convId={conv_id}）"))
+
+    return findings
+
+
+def run_chat_knowledge_stream_test(entries, api_base_url, token, timeout=90):
+    return _run_chat_mode_stream_test(
+        entries, api_base_url, token, timeout, mode="knowledge", chat_stream_path="/public/chat/v2/chat/knowledge:stream", mode_label="knowledge", prepare_params_fn=_prepare_knowledge_params
+    )
+
+
+def run_chat_agentic_rag_stream_test(entries, api_base_url, token, timeout=90):
+    return _run_chat_mode_stream_test(
+        entries, api_base_url, token, timeout, mode="agentic-rag", chat_stream_path="/public/chat/v2/chat/agenticRag:stream", mode_label="agentic-rag", prepare_params_fn=_prepare_knowledge_params
+    )
+
+
+def run_chat_faq_stream_test(entries, api_base_url, token, timeout=90):
+    return _run_chat_mode_stream_test(
+        entries, api_base_url, token, timeout, mode="faq", chat_stream_path="/public/chat/v2/chat/faq:stream", mode_label="faq", prepare_params_fn=_prepare_faq_params
+    )
+
+
+def run_chat_tabular_stream_test(entries, api_base_url, token, timeout=90):
+    return _run_chat_mode_stream_test(
+        entries, api_base_url, token, timeout, mode="tabular", chat_stream_path="/public/chat/v2/chat/tabular:stream", mode_label="tabular", prepare_params_fn=_prepare_tabular_params
+    )
+
+
+def run_llm_visual_completions_test(entries, api_base_url, token, timeout=60):
+    """測試 LLM V1 的圖片對話（`POST /llm/v1/visual/v1/chat/completions`）。
+
+    無狀態呼叫，不需要清理。用一個公開、穩定的測試圖片網址（httpbin.org 的靜態測試圖）——
+    如果部署環境對外連線有限制、連不到這個網址，這裡會回報成失敗，但那其實是環境限制，
+    不是這支 API 本身的問題，回報訊息裡會註明這個可能性。
+    """
+    findings = []
+    filename, group = "llm-v1.yaml", "LLM V1"
+    entry = next((e for e in entries if e.get("filename") == filename and e.get("spec")), None)
+    if not entry:
+        findings.append(_finding("live_write_skipped", "info", filename, group, f"找不到 {filename} 的 spec，跳過寫入測試"))
+        return findings
+
+    spec = entry["spec"]
+    paths = spec.get("paths") or {}
+
+    def op_of(path, method):
+        op = paths[path][method]
+        op["__spec__"] = spec
+        return op
+
+    visual_path = "/public/llm/v1/visual/v1/chat/completions"
+    test_image_url = "https://httpbin.org/image/jpeg"
+
+    session = requests.Session()
+    session.headers.update({"X-Access-Token": token, "Content-Type": "application/json"})
+    base = api_base_url.rstrip("/")
+
+    try:
+        resp = session.post(
+            f"{base}{visual_path}",
+            json={
+                "model": "vlm-v3.11",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "[agent-test] live-call visual completions 驗證，請用一句話簡短描述這張圖片"},
+                            {"type": "image_url", "image_url": {"url": test_image_url}},
+                        ],
+                    }
+                ],
+            },
+            timeout=timeout,
+        )
+    except requests.RequestException as exc:
+        findings.append(_finding("live_write_error", "error", filename, group, f"POST visual completions 失敗：{exc}", path=visual_path, method="POST"))
+        return findings
+
+    if _is_permission_denied(resp):
+        findings.append(_finding("live_write_skipped", "info", filename, group, f"測試帳號沒有呼叫 visual completions 的權限（{resp.status_code}），跳過這組測試", path=visual_path, method="POST"))
+        return findings
+
+    ok = _check_status_and_schema(op_of(visual_path, "post"), resp, findings, filename, group, visual_path, "post")
+    if not ok or resp.status_code != 200:
+        findings.append(
+            _finding(
+                "live_write_aborted",
+                "error",
+                filename,
+                group,
+                f"POST visual completions 沒有回 200（實際 {resp.status_code}），中止測試——如果原因跟抓不到測試圖片網址（{test_image_url}）有關，可能是部署環境對外連線限制，不是 API 本身的問題",
+                path=visual_path,
+                method="POST",
+            )
+        )
+        return findings
+
+    try:
+        body = resp.json()
+        choices = body.get("choices") or []
+        if not choices or not (choices[0].get("message") or {}).get("content"):
+            findings.append(_finding("live_write_data_mismatch", "error", filename, group, "回應的 choices 是空的，或第一個 choice 沒有 message.content", path=visual_path, method="POST"))
+    except Exception as exc:  # noqa: BLE001
+        findings.append(_finding("live_write_aborted", "error", filename, group, f"解析 visual completions 回應失敗：{exc}", path=visual_path, method="POST"))
+        return findings
+
+    if not any(f["rule"].startswith("live_write_") and f["severity"] == "error" for f in findings):
+        findings.append(_finding("live_write_ok", "info", filename, group, "visual completions 呼叫成功，收到模型對測試圖片的描述回應"))
 
     return findings
