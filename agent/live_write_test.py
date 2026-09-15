@@ -24,6 +24,7 @@ import json
 import mimetypes
 import os
 import time
+import uuid
 
 import requests
 from jsonschema import Draft202012Validator
@@ -1985,10 +1986,15 @@ def _prepare_knowledge_params(session, base, timeout, findings):
     knowledges_path = "/public/knowledge/v3/knowledges"
     filename, group = "chat-v2.yaml", "Chat V2"
 
+    # 名稱要每次呼叫都不同：這個 helper 會被 knowledge/agentic-rag 的一般版與串流版共 4 個測試各呼叫一次，
+    # 如果用固定名稱，一旦前一次建立的知識庫卡在索引中沒被清乾淨（stg2 曾發生過），
+    # 後面幾次用同名字建立就會撞到 409 conflict，連帶讓其他測試也跳過。
+    knowledge_name = TEST_TITLE + f"（chat mode 測試用 {uuid.uuid4().hex[:8]}）"
+
     try:
         resp = session.post(
             f"{base}{knowledges_path}",
-            json={"knowledge": {"name": TEST_TITLE + "（chat mode 測試用）", "description": "[agent-test] 用於驗證 chat knowledge/agentic-rag mode，測試完會刪除"}},
+            json={"knowledge": {"name": knowledge_name, "description": "[agent-test] 用於驗證 chat knowledge/agentic-rag mode，測試完會刪除"}},
             timeout=timeout,
         )
     except requests.RequestException as exc:
