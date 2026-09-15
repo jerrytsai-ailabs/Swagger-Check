@@ -34,7 +34,8 @@ python run_check.py --live-write        # 加上 POST/PUT/DELETE 測試（見下
 python run_check.py --llm-check         # 加上 LLM 文字審查（會呼叫真的 LLM API，較慢）
 python run_check.py --notify            # 跑完推播摘要到 Google Chat
 python run_check.py --notify-teams      # 跑完推播摘要到 Microsoft Teams
-python run_check.py --no-diff           # 不跟上次執行比對（預設會比對並更新快照）
+python run_check.py --no-diff           # 不跟快照比對（預設會比對並更新快照）
+python run_check.py --diff-against v3.10  # 強制跟指定版本的快照比對，而不是自動選最接近的版本
 python run_check.py --base-url https://fedgpt-stg2-vm1.corp.ailabs.tw/swagger/docs --token <stg2 token>
 ```
 以上旗標可以自由組合。想固定測 stg2 的話，直接用 [test_stg2.ps1](test_stg2.ps1)：
@@ -157,7 +158,7 @@ Agent 能檢查出「這裡沒寫 description」，但**不負責猜測正確的
 
 ### 3.2 向下相容改法：跟上次執行比對，不等 3.10
 
-**每次執行都跟上一次存的 spec 快照做 diff**：第一次跑某份 spec 時沒有基準可比，只會存下來；之後每次執行都會抓出跟上次比較的差異，抓完再把這次內容存回去當下次的基準。
+**每次執行都跟快照做 diff**：第一次看到某個版本時沒有基準可比，只會存下來；之後每次執行都會抓出跟基準比較的差異，抓完再把這次內容存回去當下次的基準。
 
 已經做出雛形並實測驗證（`agent/spec_diff.py`），會抓：
 
@@ -169,6 +170,15 @@ Agent 能檢查出「這裡沒寫 description」，但**不負責猜測正確的
 - 宣告的回應狀態碼被移除或新增
 
 驗證方式：手動在快照裡模擬「欄位從選填變必填」跟「新增一個狀態碼」兩種變化，重跑一次，兩筆都被正確抓出來，嚴重度也分得出來（前者 error、後者 info）。
+
+**快照依版本號分資料夾**：`spec_snapshots/<version>/<檔名>.yaml`，版本號直接讀每份 spec 自己的 `info.version`。實測發現這個欄位在不同環境行為不一樣：dev 環境（`fedgpt-dev`）固定回 `"latest"`（跟得上最新開發進度，本來就沒有版號概念）；**stg2 環境會回真的版號**（實測當下是 `v3.12`），代表 stg2 是跟著特定 sprint release 走的。
+
+比對基準的選擇邏輯：
+- 目前版本本地端已經有快照 → 跟它比（等同「跟上次執行這個版本時比」）。
+- 目前版本是本地端第一次看到（例如剛切到新版本）→ **自動改跟本地端已存過、版號最接近的舊版本比**，而不是直接當「沒東西可比」，這樣版本切換的當下就能立刻抓到破壞性變更。
+- 也可以用 `--diff-against v3.10` 明確指定要跟哪個版本比（該版本本地端沒有快照的話會報 warning，不會硬比）。
+
+不管跟誰比，這次抓到的內容一律存回「目前版本」自己的資料夾，不會覆蓋掉其他版本的快照。
 
 
 ---

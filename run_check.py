@@ -59,7 +59,7 @@ from agent.live_write_test import (
 )
 from agent.llm_check import run_llm_checks
 from agent.report import render_html
-from agent.spec_diff import SNAPSHOT_DIR_DEFAULT, run_spec_diff
+from agent.spec_diff import SNAPSHOT_DIR_DEFAULT, run_spec_diff, spec_version
 from agent.teams_notify import build_teams_payload, post_to_teams
 
 
@@ -76,7 +76,14 @@ def main():
     parser.add_argument("--api-base-url", default=None, help="覆寫 live call 要打的 API origin（預設從 --base-url 推導）")
     parser.add_argument("--token", default=FEDGPT_ACCESS_TOKEN, help="覆寫 FEDGPT_ACCESS_TOKEN（live call 用）")
     parser.add_argument("--no-diff", action="store_true", help="不跟上次執行存的基準比對 spec 差異")
-    parser.add_argument("--snapshot-dir", default=SNAPSHOT_DIR_DEFAULT, help="spec 基準快照存放資料夾")
+    parser.add_argument("--snapshot-dir", default=SNAPSHOT_DIR_DEFAULT, help="spec 基準快照存放資料夾（底下依版本號分子資料夾）")
+    parser.add_argument(
+        "--diff-against",
+        default=None,
+        metavar="VERSION",
+        help="強制跟指定版本號的快照比對（如 v3.10），而不是預設的『跟目前版本自己的上次快照比，"
+        "沒有的話自動退回跟最接近的舊版本比』",
+    )
     parser.add_argument(
         "--llm-check", action="store_true", help="額外用 LLM 審查 description 清不清楚、有沒有邏輯矛盾（會呼叫真的 LLM API，較慢）"
     )
@@ -113,8 +120,12 @@ def main():
         findings.extend(live_findings)
 
     if not args.no_diff:
-        print(f"跟上次執行的基準比對 spec 差異（{args.snapshot_dir}）...")
-        diff_findings = run_spec_diff(entries, args.snapshot_dir)
+        current_version = spec_version(entries)
+        if args.diff_against:
+            print(f"目前版本 {current_version}，強制跟指定版本 {args.diff_against} 比對 spec 差異（{args.snapshot_dir}）...")
+        else:
+            print(f"目前版本 {current_version}，比對 spec 差異（{args.snapshot_dir}）...")
+        diff_findings = run_spec_diff(entries, args.snapshot_dir, diff_against=args.diff_against)
         print(f"spec diff 共 {len(diff_findings)} 筆發現")
         findings.extend(diff_findings)
 

@@ -12,10 +12,12 @@
 """
 
 import os
+import re
 
 from .config import HTTP_METHODS
 
 SNAPSHOT_DIR_DEFAULT = "spec_snapshots"
+UNVERSIONED_LABEL = "unversioned"
 
 
 def _finding(rule, severity, file, group, message, path=None, method=None, location=""):
@@ -46,6 +48,36 @@ def _save_snapshot(snapshot_dir, filename, raw_text):
     os.makedirs(snapshot_dir, exist_ok=True)
     with open(os.path.join(snapshot_dir, filename), "w", encoding="utf-8") as fh:
         fh.write(raw_text)
+
+
+def spec_version(entries):
+    """從這次抓到的 spec 找目前的版本號（每份檔案的 info.version），拿來決定快照要存進哪個版本資料夾。
+
+    stg2 等有掛版號的環境會回真的版號（如 v3.12）；dev 環境固定回 "latest"（跟得上最新開發進度，
+    本來就沒有版號概念）。全部檔案都抓不到 spec 時退回 UNVERSIONED_LABEL，快照還是能正常運作，
+    只是不會有意義的版本分類。
+    """
+    for entry in entries:
+        if entry.get("error") or not entry.get("is_real") or not entry.get("spec"):
+            continue
+        version = (entry["spec"].get("info") or {}).get("version")
+        if version:
+            return str(version)
+    return UNVERSIONED_LABEL
+
+
+def _version_sort_key(version):
+    """把版號轉成可比大小的 key，格式抓不到數字（如 "latest"）就排到最後面，用字串排序當退路。"""
+    numbers = re.findall(r"\d+", version)
+    if numbers:
+        return (0, tuple(int(n) for n in numbers), version)
+    return (1, (), version)
+
+
+def _existing_version_dirs(snapshot_dir):
+    if not os.path.isdir(snapshot_dir):
+        return []
+    return [d for d in os.listdir(snapshot_dir) if os.path.isdir(os.path.join(snapshot_dir, d))]
 
 
 def _diff_schema(old_schema, new_schema, file, group, path, method, breadcrumb, findings, depth=0):
@@ -213,13 +245,51 @@ def _diff_operation(old_op, new_op, file, group, path, method, findings):
             _diff_schema(old_schema, new_schema, file, group, path, method, f"responses.{status}", findings)
 
 
-def run_spec_diff(entries, snapshot_dir=SNAPSHOT_DIR_DEFAULT):
+def run_spec_diff(entries, snapshot_dir=SNAPSHOT_DIR_DEFAULT, diff_against=None):
+    """比對這次抓到的 spec 跟快照的差異。
+
+    快照依版本號分資料夾存放（snapshot_dir/<version>/<filename>），版本號來自 spec 自己的
+    info.version（見 spec_version()）。預設行為：
+      - 現在這個版本本地端已經有快照 -> 跟它比（等同「跟上次執行這個版本時比」）。
+      - 現在這個版本是本地端第一次看到 -> 自動改跟本地端已存過、版號最接近的舊版本比，
+        而不是直接當「沒東西可比」，這樣版本切換的當下就能抓到破壞性變更。
+    也可以用 diff_against 指定一個明確的版本號，強制跟那個版本比（該版本本地端沒有快照時
+    會補一筆 warning，不會有 diff 結果)。不管跟誰比，這次的內容一律存回「現在這個版本」的資料夾。
+    """
     findings = []
+    version = spec_version(entries)
+    own_dir = os.path.join(snapshot_dir, version)
+    auto_fallback = False
+
+    if diff_against:
+        baseline_dir = os.path.join(snapshot_dir, diff_against)
+        baseline_label = diff_against
+        if not os.path.isdir(baseline_dir):
+            findings.append(
+                _finding(
+                    "diff_baseline_missing",
+                    "warning",
+                    "-",
+                    "-",
+                    f"指定要比對的版本「{diff_against}」在 {snapshot_dir} 底下找不到快照，這次不會有 spec diff 結果",
+                )
+            )
+            baseline_dir = None
+    else:
+        baseline_dir = own_dir
+        baseline_label = version
+        if not os.path.isdir(own_dir):
+            candidates = [v for v in _existing_version_dirs(snapshot_dir) if v != version]
+            if candidates:
+                baseline_label = max(candidates, key=_version_sort_key)
+                baseline_dir = os.path.join(snapshot_dir, baseline_label)
+                auto_fallback = True
+
     for entry in entries:
         if entry["error"] or not entry.get("is_real") or not entry.get("spec"):
             continue
 
-        old_spec = _load_snapshot(snapshot_dir, entry["filename"])
+        old_spec = _load_snapshot(baseline_dir, entry["filename"]) if baseline_dir else None
         new_spec = entry["spec"]
 
         if old_spec is None:
@@ -229,10 +299,24 @@ def run_spec_diff(entries, snapshot_dir=SNAPSHOT_DIR_DEFAULT):
                     "info",
                     entry["filename"],
                     entry["group"],
-                    "第一次看到這份 spec，先存成比對基準，下次執行才會顯示差異",
+                    f"版本 {version} 沒有可比對的快照，先存成比對基準，下次執行才會顯示差異",
                 )
             )
         else:
+            if baseline_label != version:
+                if auto_fallback:
+                    cross_version_message = f"本地端還沒有版本 {version} 的快照，自動改用最接近的舊版本（{baseline_label}）當比對基準"
+                else:
+                    cross_version_message = f"依指定跟版本 {baseline_label} 比對（目前版本是 {version}）"
+                findings.append(
+                    _finding(
+                        "diff_baseline_cross_version",
+                        "info",
+                        entry["filename"],
+                        entry["group"],
+                        cross_version_message,
+                    )
+                )
             old_paths = old_spec.get("paths") or {}
             new_paths = new_spec.get("paths") or {}
 
@@ -263,6 +347,6 @@ def run_spec_diff(entries, snapshot_dir=SNAPSHOT_DIR_DEFAULT):
                 for m in old_methods & new_methods:
                     _diff_operation(old_item[m], new_item[m], entry["filename"], entry["group"], p, m, findings)
 
-        _save_snapshot(snapshot_dir, entry["filename"], entry["raw_text"])
+        _save_snapshot(own_dir, entry["filename"], entry["raw_text"])
 
     return findings
