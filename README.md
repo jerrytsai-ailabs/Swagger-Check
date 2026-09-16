@@ -22,6 +22,8 @@ pip install -r requirements.txt
 | `FEDGPT_STG2_TOKEN` | live call 打 **stg2** 環境要用的 token | 同上，但要 stg2 環境的帳號——**兩邊 token 不能互通**，各環境帳號資料庫是分開的 |
 | `FEDFLOW_TEST_FLOW_ID` | `--live-write` 測 FedFlow execute 要打的 flow id | 選填，預設是 stg2 上一個已人工確認「無副作用」的 flow（`212913c58069778f5f399a3f466d7ffc`，名稱 "Second"）。這個 flow 只存在於 stg2，對其他環境跑會直接跳過（回 404 視為無可用測試 flow） |
 | `HELIX_TEST_AUDIO_PATH` | `--live-write` 測 Helix 聲紋（`/voices`、`/voices:searchByAudio`）與 Asura 語音相關端點（語音轉文字、零樣本語音克隆）要用的本機音檔路徑 | 選填，指到一個本機真的音檔（測試中用的是 .aac）。沒有設定就跳過這幾組測試，不是失敗；路徑含空格或特殊字元時記得用引號包起來（`.env` 也會被 bash `source` 讀到，格式要兼顧） |
+| `HELIX_ENROLLMENT_TEST_TOKEN` | `--live-write` 測 Helix `/enrollment` 要用的獨立測試帳號 token | 選填，`/enrollment` 是「一個帳號只能有一組」的資源，不能用主要測試帳號測，要一個確認過從沒註冊過聲紋的獨立測試帳號 token。沒有設定就跳過這組測試 |
+| `AUTH_LOGIN_TEST_USERNAME` / `AUTH_LOGIN_TEST_PASSWORD` | `--live-write` 測 Auth V2 的 `fedgpt/login`、`ldap/login`、`logout` 要用的次要帳號帳密 | 選填，固定用一個次要帳號（不是主要測試帳號），因為登入會產生新 token、登出會讓某個 token 失效，不想動到主要測試帳號正在用的 token。沒有設定就跳過這幾組測試 |
 | `GOOGLE_CHAT_WEBHOOK_URL` | `--notify` 推播用 | 目標 Google Chat Space → Apps & integrations → Webhooks |
 | `TEAMS_WEBHOOK_URL` | `--notify-teams` 推播用 | Teams 頻道/對話 → Workflows → 建一個 "When a Teams webhook request is received" 的 flow |
 
@@ -218,17 +220,15 @@ Agent 能檢查出「這裡沒寫 description」，但**不負責猜測正確的
 
 **測試資料隔離／清理策略（已定案並實作）**：所有測試資料的名稱/標題都以 `[agent-test]` 開頭方便辨識；每組測試都是「建立 → GET 驗證 → 修改 → GET 驗證 → 刪除 → GET 驗證真的刪了」的完整閉環，只要有明確的資源 ID 就會嘗試清乾淨，不論中途驗證步驟是否有失敗；只有在建立本身就失敗、拿不到 ID 的情況下才會整組放棄（因為根本沒建立任何東西）。
 
-**目前已涵蓋（28 組，全部驗證通過或正常跳過）**：
+**目前已涵蓋（30 組，全部驗證通過或正常跳過；46 個公開寫入端點全數涵蓋，無刻意排除項目）**：
 - Chat V2 對話（`run_conversation_crud_test`）、送訊息（`run_chat_send_message_test`）、四個資源型 mode 的一次性與串流版本（`run_chat_{knowledge,agentic_rag,faq,tabular}_mode_test` / `run_chat_{knowledge,agentic_rag,faq,tabular}_stream_test`）、`normal` 的串流版本（`run_chat_normal_stream_test`）——全部 9 個都是 SSE 方言 A
 - FAQ V1 問答集容器（`run_faq_crud_test`）與底下的問與答 entry（`run_faq_entry_crud_test`，entry 掛在臨時建立的父層容器下測試）
 - Knowledge V3 知識庫容器（`run_knowledge_crud_test`）與底下的文件（`run_knowledge_document_crud_test`，會真的走 Asset V2 上傳流程，見上方使用說明的警語）
 - FedFlow V1 的 flow 執行（`run_fedflow_execute_test`，沒有 DELETE、無法復原，固定打一個已人工確認安全的 flow，見 `FEDFLOW_TEST_FLOW_ID`）
 - Helix V1 的獨立聲紋 `/voices`（`run_helix_voice_crud_test`）、用錄音搜尋既有聲紋 `/voices:searchByAudio`（`run_helix_voice_search_by_audio_test`，需要先臨時建一個聲紋當搜尋目標，`/voices` 建立本身有已知的不穩定性，失敗就直接跳過整組）與帳號自己的 `/enrollment`（`run_helix_enrollment_test`，需要 `HELIX_ENROLLMENT_TEST_TOKEN` 指到一個從沒註冊過聲紋的獨立測試帳號，不會碰主要測試帳號的真實註冊）——三支都需要 `HELIX_TEST_AUDIO_PATH` 指到本機真的音檔
-- Auth V2（`run_auth_apikey_crud_test`）與 Admin V1（`run_admin_apikey_crud_test`，只操作測試帳號自己的 userId，不碰其他使用者）的 API key CRUD
+- Auth V2 的 API key CRUD（`run_auth_apikey_crud_test`）、`fedgpt/login` + `logout`（`run_auth_login_logout_test`，固定用 `AUTH_LOGIN_TEST_USERNAME`/`AUTH_LOGIN_TEST_PASSWORD` 指定的次要帳號，不會動到主要測試帳號的 token；刻意不測密碼打錯，避免累積失敗次數觸發帳號鎖定）、`ldap/login`（`run_auth_ldap_login_test`，先查 `GET /providers` 確認有沒有開，這組次要帳號已知只給 `fedgpt` 用，預期以 401 正常跳過）；以及 Admin V1（`run_admin_apikey_crud_test`，只操作測試帳號自己的 userId，不碰其他使用者）的 API key CRUD
 - LLM V1 的 embeddings（`run_llm_embeddings_test`）、visual completions（`run_llm_visual_completions_test`，圖片網址用固定的公開測試圖，部署環境若限制對外連線可能因此失敗——那是環境限制不是 API 問題）與直接的 chat completions（`run_llm_chat_completions_test`，先 `GET /models` 拿代稱，回 404 時照文件建議改用帶版號的模型 ID 重試一次）
 - Asura V1 的文字轉語音（`run_asura_tts_test`）、零樣本語音克隆（`run_asura_speech_zero_shot_test`，目前這個環境上這支端點有 bug，見下方）、語音轉文字（`run_asura_transcription_test`，沒有 DELETE，工作紀錄永久留存）、即時轉錄連線 token（`run_asura_neartime_token_test`，只驗證取得憑證的契約，不實際連 WebSocket）
-
-**刻意排除**：Auth V2 的 `fedgpt/login`、`ldap/login`、`logout` 三支沒有測——測登入會產生新的 session/token，測登出會讓某個 token 失效，之前就發生過拿正式測試帳號的 token 測試造成連鎖失效的狀況，風險與測試價值不成比例，先跳過。
 
 **測試過程中意外發現的 spec 正確性問題**（都已記錄成報告裡的 `spec_description_mismatch` 或 `undocumented_status_code` finding）：
 - `DELETE /knowledge/v3/knowledges/{knowledgeId}` 文件寫「底下的文件會一起消失」，實測要先清空文件才能刪除（回 423，且未宣告這個狀態碼）
@@ -241,6 +241,7 @@ Agent 能檢查出「這裡沒寫 description」，但**不負責猜測正確的
 - `POST /helix/v1/enrollment` 拒絕多說話者音檔時（`MULTIPLE_SPEAKERS`），回應的 `service`／`reason` 都是空字串，不符合 Error schema「`reason` 必填、程式請用它做分支」的說明
 - `POST /asura/v1/speeches:zero-shot` 的 `ZeroShotSpeechInput.input` 只把 `text` 標必填，`promptVoiceUrl`/`promptVoiceAssetKey` 都是選填，但兩個都不帶實際回 400，代表伺服器端其實兩者擇一是必填
 - `POST /asura/v1/speeches:zero-shot` 照 spec 建議的做法（走 `transcriptions:presign` 上傳、把 `assetKey` 填進 `promptVoiceAssetKey`）一律回 500（`http-gateway`／`data.unhandled`／`unexpected status code: 400`，代表上游回了 400 但這層沒處理、直接包成看不出原因的 500）。手動排查過排除是 assetKey 或模型名稱的問題：同一個 assetKey 打 `/transcriptions` 完全正常，換成已驗證能連得到的真實網址填 `promptVoiceUrl` 一樣回同一個 500——這支端點處理語音範本輸入的路徑本身壞了，比較像後端 bug 而非文件問題
+- `POST /auth/v2/logout` 的敘述文字寫「註銷後再用同一個 token 會拿到 401 auth.invalid-auth」，實測行為跟敘述一致，但正式的 `responses` 只宣告了 `200`，401 沒有列進去——文件的敘述段落跟正式的狀態碼清單對不上
 
 **工具本身的 bug（非 spec 問題，記錄下來避免以後重踩）**：`_parse_sse_dialect_a` 一開始用 `resp.iter_lines(decode_unicode=True)` 解析 SSE 串流，`requests` 這個參數會在網路封包還沒重組成完整一行前就先解碼，中文字的 UTF-8 多位元組序列被切在封包邊界時會解碼壞掉、把一則 `data:` 誤判成兩行，導致 `chat/faq:stream`、`chat/tabular:stream` 這兩個「回應剛好含中文」的測試一直收不到任何 `event: data`。修正是改讀原始 bytes 再自己用 `\n` 分行（UTF-8 裡 `\n` 永遠是安全的分割點）、每行湊齊後才解碼。
 
@@ -249,7 +250,7 @@ Agent 能檢查出「這裡沒寫 description」，但**不負責猜測正確的
 - 曾經遇過 Knowledge V3 文件的索引長時間停在 `doing` 不動、`DELETE` 回 `423 data.locked`（`"workflow already running"`），一度以為是 workflow 卡死，兩筆 `[agent-test]` 開頭的知識庫/文件清不掉。**後來追蹤到不是卡死，是索引跑得非常慢**——同一批文件事後查詢已經變成 `displayState: "completed"`，從建立到真的完成索引中間隔了將近 1 小時 45 分鐘。比較像是 stg2 索引服務有嚴重的排隊/延遲問題，不是 workflow 真的壞掉；再遇到的話，只要等夠久（不是等幾分鐘，是等一兩個小時）通常就能正常刪除，不需要手動介入。
 - 前一項的延遲間接暴露了測試程式碼自己的問題：好幾支測試用**固定字串**當臨時資源的名稱（如「...（chat mode 測試用）」），如果前一次執行建立的資源因為上面這個延遲還沒被清乾淨，下一次執行用同樣名稱建立會撞 `409 conflict`，連帶讓那組測試被跳過。修法是幫這些固定名稱都加上一段隨機後綴（`uuid.uuid4().hex[:8]`），讓同名容器不再互相卡到；已經套用到 Knowledge/FAQ 兩個 chat-mode 用的臨時容器，以及 FAQ entry 測試、Knowledge document 測試各自用的臨時容器。
 
-**尚未涵蓋**：Auth V2 的 `fedgpt/login`、`ldap/login`、`logout` 三支（見上方「刻意排除」），其餘已知的公開端點全部涵蓋。
+**尚未涵蓋**：目前已知的公開端點全部涵蓋，沒有刻意排除的項目。
 
 ---
 
@@ -260,7 +261,7 @@ Agent 能檢查出「這裡沒寫 description」，但**不負責猜測正確的
 2.「跟上次執行比對」取代 3.10 baseline（見 3.2 節）。
 3. Jira 開票的目標 project、issue type、必填欄位規則。
 4. HTML report 的呈現內容與對象（給 PJM 看？給開發看？）。
-5. ~~Live call 驗證（第二階段）的啟動時機與範圍~~ — 已啟動 GET 部分並實測 dev/stg2 環境，也已擴大到 POST/PUT/DELETE（見第 7 節，28 組寫入測試全部驗證通過或正常跳過，涵蓋 Chat/FAQ/Knowledge/FedFlow/Helix/Auth/Admin/LLM/Asura，含四個資源型 mode 的一次性與串流版本、Helix 用錄音搜尋聲紋、LLM 直接 chat completions，以及用獨立測試帳號測到的 Helix `/enrollment`）。除了刻意排除的 Auth V2 登入/登出三支，其餘已知的公開端點全部涵蓋。累積抓到的真實文件/行為落差、以及營運上的注意事項（token 撤銷、知識庫索引異常緩慢、測試資源固定命名撞名）列在第 7 節。
+5. ~~Live call 驗證（第二階段）的啟動時機與範圍~~ — 已啟動 GET 部分並實測 dev/stg2 環境，也已擴大到 POST/PUT/DELETE（見第 7 節，30 組寫入測試全部驗證通過或正常跳過，46 個公開寫入端點全數涵蓋，涵蓋 Chat/FAQ/Knowledge/FedFlow/Helix/Auth/Admin/LLM/Asura，含四個資源型 mode 的一次性與串流版本、Helix 用錄音搜尋聲紋、LLM 直接 chat completions、Auth V2 的 login/logout，以及用獨立測試帳號測到的 Helix `/enrollment`）。目前已知的公開端點全部涵蓋，沒有刻意排除的項目。累積抓到的真實文件/行為落差、以及營運上的注意事項（token 撤銷、知識庫索引異常緩慢、測試資源固定命名撞名）列在第 7 節。
 6. CI / 排程整合的時間點——現在有了「跟上次執行比對」的機制後，這點變得更重要：要多久固定跑一次，才不會讓兩次執行之間累積太多變化，待後續討論再定案。
 
 ---

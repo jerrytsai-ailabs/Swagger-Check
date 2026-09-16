@@ -3607,3 +3607,231 @@ def run_llm_chat_completions_test(entries, api_base_url, token, timeout=60):
         findings.append(_finding("live_write_ok", "info", filename, group, f"chat completions 呼叫成功（model={body['model']}）"))
 
     return findings
+
+
+def run_auth_login_logout_test(entries, api_base_url, token, timeout=30):
+    """測試 Auth V2 的 `POST /fedgpt/login` + `POST /logout`。
+
+    這兩支的風險跟其他 --live-write 端點不一樣：login 會產生新的 access token，logout 會讓
+    某個 token 失效。固定用 `config.AUTH_LOGIN_TEST_USERNAME`/`AUTH_LOGIN_TEST_PASSWORD` 指定
+    的次要帳號（不是傳進來的 `token` 參數——那是主要測試帳號的，這裡刻意不用），登入後立刻用
+    剛拿到的新 token 登出，全程不會動到主要測試帳號正在用的 token。沒有設定帳密就跳過測試。
+
+    刻意不測「密碼打錯」的情境：spec 有連續失敗鎖定帳號的機制（`429 auth.locked`），如果排程
+    重複執行這個測試，累積的錯誤嘗試可能真的把這個次要帳號鎖住，風險大於測試價值。
+    """
+    from .config import AUTH_LOGIN_TEST_PASSWORD, AUTH_LOGIN_TEST_USERNAME
+
+    findings = []
+    filename, group = "auth-v2.yaml", "Auth V2"
+
+    if not AUTH_LOGIN_TEST_USERNAME or not AUTH_LOGIN_TEST_PASSWORD:
+        findings.append(_finding("live_write_skipped", "info", filename, group, "沒有設定 AUTH_LOGIN_TEST_USERNAME/AUTH_LOGIN_TEST_PASSWORD，跳過 login/logout 測試"))
+        return findings
+
+    entry = next((e for e in entries if e.get("filename") == filename and e.get("spec")), None)
+    if not entry:
+        findings.append(_finding("live_write_skipped", "info", filename, group, f"找不到 {filename} 的 spec，跳過寫入測試"))
+        return findings
+
+    spec = entry["spec"]
+    paths = spec.get("paths") or {}
+
+    def op_of(path, method):
+        op = paths[path][method]
+        op["__spec__"] = spec
+        return op
+
+    login_path = "/public/auth/v2/fedgpt/login"
+    logout_path = "/public/auth/v2/logout"
+    base = api_base_url.rstrip("/")
+
+    session = requests.Session()
+    session.headers.update({"Content-Type": "application/json"})
+
+    try:
+        resp = session.post(f"{base}{login_path}", json={"authKey": AUTH_LOGIN_TEST_USERNAME, "authSecret": AUTH_LOGIN_TEST_PASSWORD}, timeout=timeout)
+    except requests.RequestException as exc:
+        findings.append(_finding("live_write_error", "error", filename, group, f"POST 登入失敗：{exc}", path=login_path, method="POST"))
+        return findings
+
+    ok = _check_status_and_schema(op_of(login_path, "post"), resp, findings, filename, group, login_path, "post")
+    if not ok or resp.status_code != 200:
+        findings.append(_finding("live_write_aborted", "error", filename, group, f"POST 登入沒有回 200（實際 {resp.status_code}），中止測試", path=login_path, method="POST"))
+        return findings
+
+    try:
+        new_token = resp.json()["token"]
+        if not new_token:
+            raise ValueError("token 是空的")
+    except Exception as exc:  # noqa: BLE001
+        findings.append(_finding("live_write_aborted", "error", filename, group, f"登入回應裡拿不到有效的 token：{exc}", path=login_path, method="POST"))
+        return findings
+
+    logout_session = requests.Session()
+    logout_session.headers.update({"X-Access-Token": new_token, "Content-Type": "application/json"})
+
+    try:
+        resp = logout_session.post(f"{base}{logout_path}", timeout=timeout)
+    except requests.RequestException as exc:
+        findings.append(_finding("live_write_error", "error", filename, group, f"POST 登出失敗：{exc}，剛登入的 token 可能沒有失效，需要留意", path=logout_path, method="POST"))
+        return findings
+
+    ok = _check_status_and_schema(op_of(logout_path, "post"), resp, findings, filename, group, logout_path, "post")
+    if not ok or resp.status_code != 200 or not resp.json().get("success"):
+        findings.append(_finding("live_write_aborted", "error", filename, group, f"POST 登出沒有成功（{resp.status_code}），剛登入的 token 可能沒有失效，需要留意", path=logout_path, method="POST"))
+        return findings
+
+    # 驗證真的失效：再用同一個 token 打一次 logout。spec 的敘述說這時候會拿到
+    # 401 auth.invalid-auth，但這支端點的 responses 只正式宣告了 200，401 沒有列在裡面——
+    # _check_status_and_schema 遇到未宣告的狀態碼會自動記一筆 undocumented_status_code，
+    # 這裡另外驗證 reason 內容符不符合敘述。
+    try:
+        resp = logout_session.post(f"{base}{logout_path}", timeout=timeout)
+    except requests.RequestException as exc:
+        findings.append(_finding("live_write_error", "warning", filename, group, f"驗證登出後 token 是否真的失效時失敗：{exc}", path=logout_path, method="POST"))
+    else:
+        _check_status_and_schema(op_of(logout_path, "post"), resp, findings, filename, group, logout_path, "post")
+        if resp.status_code == 401:
+            try:
+                reason = resp.json().get("reason", "")
+            except ValueError:
+                reason = ""
+            if reason != "auth.invalid-auth":
+                findings.append(
+                    _finding(
+                        "spec_description_mismatch",
+                        "warning",
+                        filename,
+                        group,
+                        f"spec 敘述說登出後再用同一個 token 的 reason 會是 auth.invalid-auth，實測是 {reason!r}",
+                        path=logout_path,
+                        method="POST",
+                    )
+                )
+        else:
+            findings.append(
+                _finding(
+                    "spec_description_mismatch",
+                    "warning",
+                    filename,
+                    group,
+                    f"spec 敘述說登出後再用同一個 token 會拿到 401 auth.invalid-auth，實測是 {resp.status_code}——token 可能沒有真的失效",
+                    path=logout_path,
+                    method="POST",
+                )
+            )
+
+    if not any(f["rule"].startswith("live_write_") and f["severity"] == "error" for f in findings):
+        findings.append(_finding("live_write_ok", "info", filename, group, "登入 → 登出 → 驗證 token 真的失效全部驗證通過（次要測試帳號，未動到主要測試帳號的 token）"))
+
+    return findings
+
+
+def run_auth_ldap_login_test(entries, api_base_url, token, timeout=30):
+    """測試 Auth V2 的 `POST /ldap/login`。
+
+    先打 `GET /providers` 確認這個部署有沒有啟用、設定好 LDAP 登入，沒有的話直接跳過，
+    不會真的對 LDAP 登入端點發送任何請求。
+
+    `config.AUTH_LOGIN_TEST_USERNAME`/`AUTH_LOGIN_TEST_PASSWORD` 這組次要帳號已確認只給
+    `fedgpt` provider 用，不是 LDAP 帳密——這裡仍然會實際打一次 `ldap/login`，但預期會被
+    `401 auth.invalid-auth` 擋下來，那視為「這組帳密不適用 LDAP」而正常跳過，不是失敗；
+    只打一次、不重試，避免影響到這個 LDAP 測試網域帳號自己的鎖定策略。
+    """
+    from .config import AUTH_LOGIN_TEST_PASSWORD, AUTH_LOGIN_TEST_USERNAME
+
+    findings = []
+    filename, group = "auth-v2.yaml", "Auth V2"
+
+    if not AUTH_LOGIN_TEST_USERNAME or not AUTH_LOGIN_TEST_PASSWORD:
+        findings.append(_finding("live_write_skipped", "info", filename, group, "沒有設定 AUTH_LOGIN_TEST_USERNAME/AUTH_LOGIN_TEST_PASSWORD，跳過 ldap/login 測試"))
+        return findings
+
+    entry = next((e for e in entries if e.get("filename") == filename and e.get("spec")), None)
+    if not entry:
+        findings.append(_finding("live_write_skipped", "info", filename, group, f"找不到 {filename} 的 spec，跳過寫入測試"))
+        return findings
+
+    spec = entry["spec"]
+    paths = spec.get("paths") or {}
+
+    def op_of(path, method):
+        op = paths[path][method]
+        op["__spec__"] = spec
+        return op
+
+    providers_path = "/public/auth/v2/providers"
+    login_path = "/public/auth/v2/ldap/login"
+    logout_path = "/public/auth/v2/logout"
+    base = api_base_url.rstrip("/")
+
+    session = requests.Session()
+    session.headers.update({"Content-Type": "application/json"})
+
+    try:
+        resp = session.get(f"{base}{providers_path}", timeout=timeout)
+    except requests.RequestException as exc:
+        findings.append(_finding("live_write_error", "error", filename, group, f"GET providers 失敗：{exc}", path=providers_path, method="GET"))
+        return findings
+
+    if resp.status_code != 200:
+        findings.append(_finding("live_write_aborted", "error", filename, group, f"GET providers 沒有回 200（實際 {resp.status_code}），跳過這組測試", path=providers_path, method="GET"))
+        return findings
+
+    try:
+        providers = resp.json().get("items") or []
+    except Exception as exc:  # noqa: BLE001
+        findings.append(_finding("live_write_aborted", "error", filename, group, f"解析 providers 清單失敗：{exc}", path=providers_path, method="GET"))
+        return findings
+
+    ldap_provider = next((p for p in providers if p.get("provider") == "ldap"), None)
+    if not ldap_provider or not ldap_provider.get("isValid"):
+        findings.append(_finding("live_write_skipped", "info", filename, group, "這個部署沒有啟用/設定好 LDAP 登入（GET providers 查不到有效的 ldap），跳過測試", path=login_path, method="POST"))
+        return findings
+
+    try:
+        resp = session.post(f"{base}{login_path}", json={"authKey": AUTH_LOGIN_TEST_USERNAME, "authSecret": AUTH_LOGIN_TEST_PASSWORD}, timeout=timeout)
+    except requests.RequestException as exc:
+        findings.append(_finding("live_write_error", "error", filename, group, f"POST LDAP 登入失敗：{exc}", path=login_path, method="POST"))
+        return findings
+
+    if resp.status_code == 401:
+        try:
+            reason = resp.json().get("reason", "")
+        except ValueError:
+            reason = ""
+        if reason == "auth.invalid-auth":
+            findings.append(
+                _finding("live_write_skipped", "info", filename, group, "測試帳號不是有效的 LDAP 帳密（這組帳密只給 fedgpt provider 用），跳過這組測試", path=login_path, method="POST")
+            )
+            return findings
+
+    ok = _check_status_and_schema(op_of(login_path, "post"), resp, findings, filename, group, login_path, "post")
+    if not ok or resp.status_code != 200:
+        findings.append(_finding("live_write_aborted", "error", filename, group, f"POST LDAP 登入沒有回 200（實際 {resp.status_code}），中止測試", path=login_path, method="POST"))
+        return findings
+
+    try:
+        new_token = resp.json()["token"]
+        if not new_token:
+            raise ValueError("token 是空的")
+    except Exception as exc:  # noqa: BLE001
+        findings.append(_finding("live_write_aborted", "error", filename, group, f"LDAP 登入回應裡拿不到有效的 token：{exc}", path=login_path, method="POST"))
+        return findings
+
+    logout_session = requests.Session()
+    logout_session.headers.update({"X-Access-Token": new_token, "Content-Type": "application/json"})
+    try:
+        logout_resp = logout_session.post(f"{base}{logout_path}", timeout=timeout)
+        if logout_resp.status_code != 200 or not logout_resp.json().get("success"):
+            findings.append(
+                _finding("live_write_cleanup_failed", "error", filename, group, f"登出剛才 LDAP 登入拿到的 token 失敗（{logout_resp.status_code}），需要留意這個 token 還有效", path=logout_path, method="POST")
+            )
+    except requests.RequestException as exc:
+        findings.append(_finding("live_write_cleanup_failed", "error", filename, group, f"登出剛才 LDAP 登入拿到的 token 失敗：{exc}，需要留意這個 token 還有效", path=logout_path, method="POST"))
+
+    if not any(f["rule"].startswith("live_write_") and f["severity"] == "error" for f in findings):
+        findings.append(_finding("live_write_ok", "info", filename, group, "LDAP 登入成功並已登出清除，測試通過"))
+
+    return findings

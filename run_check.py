@@ -37,6 +37,8 @@ from agent.live_write_test import (
     run_asura_transcription_test,
     run_asura_tts_test,
     run_auth_apikey_crud_test,
+    run_auth_ldap_login_test,
+    run_auth_login_logout_test,
     run_chat_agentic_rag_mode_test,
     run_chat_agentic_rag_stream_test,
     run_chat_faq_mode_test,
@@ -171,6 +173,8 @@ def main():
             run_asura_speech_zero_shot_test,
             run_helix_voice_search_by_audio_test,
             run_llm_chat_completions_test,
+            run_auth_login_logout_test,
+            run_auth_ldap_login_test,
         ):
             write_findings = run_test(entries, api_base_url, args.token)
             findings.extend(write_findings)

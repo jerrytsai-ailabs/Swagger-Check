@@ -57,6 +57,13 @@ HELIX_TEST_AUDIO_PATH = os.environ.get("HELIX_TEST_AUDIO_PATH", "")
 # 這裡用一個獨立的、確認過從沒註冊過聲紋的專用測試帳號 token，沒有設定就跳過這個測試。
 HELIX_ENROLLMENT_TEST_TOKEN = os.environ.get("HELIX_ENROLLMENT_TEST_TOKEN", "")
 
+# --- 高風險端點寫入測試：Auth V2 登入／登出 ---
+# 這三支目前刻意還沒測（見 README 第 7 節）：登入會產生新 session/token，登出會讓某個 token
+# 失效，拿主要測試帳號的正式 token 測很容易造成連鎖斷線。之後要測的話固定用這組次要帳號，
+# 不要用主要測試帳號。沒有設定就跳過這個測試。
+AUTH_LOGIN_TEST_USERNAME = os.environ.get("AUTH_LOGIN_TEST_USERNAME", "")
+AUTH_LOGIN_TEST_PASSWORD = os.environ.get("AUTH_LOGIN_TEST_PASSWORD", "")
+
 
 def derive_api_base_url(swagger_docs_base_url):
     """從 swagger docs 的 base URL 推回實際打 API 要用的 origin + /api。
