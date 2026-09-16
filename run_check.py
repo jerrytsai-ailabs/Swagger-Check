@@ -29,7 +29,7 @@ from agent.config import (
     derive_api_base_url,
 )
 from agent.fetch import fetch_specs, load_local_specs
-from agent.live_call import run_live_get_checks
+from agent.live_call import check_token_valid, run_live_get_checks
 from agent.live_write_test import (
     run_admin_apikey_crud_test,
     run_asura_neartime_token_test,
@@ -112,6 +112,14 @@ def main():
     for e in entries:
         status = f"失敗（{e['error']}）" if e["error"] else "OK"
         print(f"  - {e['group']:12s} {e['filename']:20s} {status}")
+
+    if (args.live or args.live_write or args.llm_check) and args.token:
+        preflight_base_url = args.api_base_url or derive_api_base_url(args.base_url)
+        print(f"檢查 token 是否有效（against {preflight_base_url}）...")
+        token_error = check_token_valid(preflight_base_url, args.token)
+        if token_error:
+            print(f"錯誤：{token_error}", file=sys.stderr)
+            return 1
 
     print("執行靜態檢查規則 ...")
     findings = run_all_checks(entries)

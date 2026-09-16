@@ -12,6 +12,7 @@ git clone <repo>
 cd SwaggerAgent
 pip install -r requirements.txt
 ```
+Mac／Linux 上如果系統的 `python`/`pip` 沒有指到 Python 3，改用 `python3`/`pip3`（下面所有指令同理，把 `python` 換成 `python3`）。
 
 ### 設定 `.env`
 在專案根目錄建立 `.env`（已加進 `.gitignore`，不會進版控），依需要填入：
@@ -40,16 +41,62 @@ python run_check.py --no-diff           # 不跟快照比對（預設會比對�
 python run_check.py --diff-against v3.10  # 強制跟指定版本的快照比對，而不是自動選最接近的版本
 python run_check.py --base-url https://fedgpt-stg2-vm1.corp.ailabs.tw/swagger/docs --token <stg2 token>
 ```
-以上旗標可以自由組合。想固定測 stg2 的話，直接用 [test_stg2.ps1](test_stg2.ps1)：
+以上旗標可以自由組合。想固定測 stg2 的話，直接用包好的腳本——Windows 用 [test_stg2.ps1](test_stg2.ps1)，Mac／Linux 用 [test_stg2.sh](test_stg2.sh)（邏輯完全一致，兩者互為對應）：
 ```powershell
+# Windows (PowerShell)
 .\test_stg2.ps1                  # 等同 --live，指向 stg2，自動吃 FEDGPT_STG2_TOKEN
 .\test_stg2.ps1 --notify-teams   # 後面接的參數都會轉給 run_check.py
 ```
+```bash
+# Mac / Linux
+chmod +x test_stg2.sh              # 第一次用要先給執行權限
+./test_stg2.sh                     # 等同 --live，指向 stg2，自動吃 FEDGPT_STG2_TOKEN
+./test_stg2.sh --notify-teams      # 後面接的參數都會轉給 run_check.py
+```
 
-⚠️ **`--live-write` 會真的建立、修改、刪除資料**，目前涵蓋 25 組測試（完整清單見第 7 節）。設計上測完會自動清除，建立的測試資料標題都會標成 `[agent-test] ...` 方便辨識，但這終究是會動到 live 環境資料的操作，跑之前想清楚指向的是哪個環境。幾個例外要特別注意：
+⚠️ **`--live-write` 會真的建立、修改、刪除資料**，目前涵蓋 30 組測試（完整清單見第 7 節）。設計上測完會自動清除，建立的測試資料標題都會標成 `[agent-test] ...` 方便辨識，但這終究是會動到 live 環境資料的操作，跑之前想清楚指向的是哪個環境。幾個例外要特別注意：
 - **Knowledge V3 文件、Asura TTS/transcriptions 測試**會實際走 Asset V2 或 Asura 自己的上傳流程，上傳的測試檔案**永久留在 storage、無法清除**（這幾支 API 本身沒有查詢或刪除端點）——這是已知且接受的殘留，不是 bug。Asura transcriptions 連工作紀錄本身也沒有 DELETE，一樣永久留著。
 - **FedFlow execute 測試**是真的觸發一次 flow 執行，**沒有回溯機制**。預設打的是 stg2 上一個已人工確認無副作用的 flow，換一顆 flow 前務必先確認清楚它的實際行為。
 - **Chat V2 相關測試**（送訊息、四個 mode、串流版本）會真的呼叫一次 LLM，有實際的 API 用量／成本。
+
+### 常用指令速查
+
+**完整驗證（stg2，含全部 30 組 `--live-write`）**——目前涵蓋範圍最完整的跑法：
+```powershell
+# Windows
+.\test_stg2.ps1 --live-write --notify-teams
+```
+```bash
+# Mac / Linux
+./test_stg2.sh --live-write --notify-teams
+```
+
+**只想看有沒有變化，不用整組寫入測試**——不會建立/刪除任何真實資料，跑得快很多，適合日常快速確認：
+```powershell
+# Windows
+.\test_stg2.ps1
+```
+```bash
+# Mac / Linux
+./test_stg2.sh
+```
+
+**不透過包好的腳本，自己指定 token**（Windows／Mac／Linux 通用，把 `python` 換成 `python3` 即可）：
+```bash
+python run_check.py --base-url https://fedgpt-stg2-vm1.corp.ailabs.tw/swagger/docs --token <stg2 token> --live-write
+```
+
+**跟指定的舊版本比對 spec 差異**（而不是自動選最接近的版本，見 3.2 節）：
+```bash
+python run_check.py --diff-against v3.10
+```
+
+**再加上 LLM 文字審查**（會呼叫真的 LLM API，較慢，也有真實花費）：
+```bash
+python run_check.py --live-write --llm-check --notify-teams
+```
+
+`--live`/`--live-write`/`--llm-check` 開始跑之前，會先打一支輕量端點確認 `--token` 有沒有過期或被撤銷（`check_token_valid`，見 [live_call.py](agent/live_call.py)）；驗證失敗會直接印出清楚的錯誤訊息並中止，不會往下跑一堆誤導性的結果。這是因為 token 失效時，如果沒有這個檢查，後面每支端點都會各自回報一個「回傳 401 但 spec 沒宣告」的 `undocumented_status_code`，報告會出現一整排看起來像是各自獨立的 spec 問題，其實共同原因只有一個。
 
 ### 報告在哪裡看
 每次執行都會在 `reports/`（已加進 `.gitignore`）產生一份帶時間戳的 HTML 檔案，直接用瀏覽器開就能看。這個資料夾只在本機，不會自動分享出去——目前要讓其他人也能看到報告，是透過 Claude Code session 手動發布成一個連結（用 Artifact 工具），不是這個 repo 自帶的功能。

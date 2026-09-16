@@ -254,3 +254,31 @@ def run_live_get_checks(entries, api_base_url, token, timeout=REQUEST_TIMEOUT_SE
         _check_response(o["entry"], o["path"], o["op"], resp.status_code, resp, findings)
 
     return findings
+
+
+def check_token_valid(api_base_url, token, timeout=REQUEST_TIMEOUT_SECONDS):
+    """在跑任何需要驗證的檢查之前，先用一支輕量的端點確認 token 還有效。
+
+    動機：token 過期或被撤銷時，後面每一支端點都會各自打出一筆獨立的 401
+    `undocumented_status_code`（很多端點的 spec 根本沒宣告 401），report 裡會出現一整排
+    看起來互不相關的 spec 問題，實際上共同原因只有一個——token 壞了。這裡先用一次呼叫把
+    真正的根因抓出來，清楚印出來，讓後面不用跑一堆會誤導人的結果。
+
+    回傳 None 代表 token 沒問題；否則回傳一句可以直接印給人看的錯誤訊息。
+    """
+    url = f"{api_base_url.rstrip('/')}/public/auth/v2/apikeys"
+    try:
+        resp = requests.get(url, headers={"X-Access-Token": token}, timeout=timeout)
+    except requests.RequestException as exc:
+        return f"連線失敗，無法確認 token 是否有效（{url}）：{exc}"
+
+    if resp.status_code == 401:
+        try:
+            body = resp.json()
+            reason, message = body.get("reason", ""), body.get("message", "")
+        except ValueError:
+            reason, message = "", ""
+        detail = f"{reason}：{message}" if reason or message else "沒有更多細節"
+        return f"token 驗證失敗（401 {detail}）——請確認 .env 裡的 token 沒有過期或被撤銷，換一組新的再重跑"
+
+    return None
