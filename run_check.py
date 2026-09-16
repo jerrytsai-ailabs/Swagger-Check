@@ -33,6 +33,7 @@ from agent.live_call import run_live_get_checks
 from agent.live_write_test import (
     run_admin_apikey_crud_test,
     run_asura_neartime_token_test,
+    run_asura_speech_zero_shot_test,
     run_asura_transcription_test,
     run_asura_tts_test,
     run_auth_apikey_crud_test,
@@ -52,8 +53,10 @@ from agent.live_write_test import (
     run_fedflow_execute_test,
     run_helix_enrollment_test,
     run_helix_voice_crud_test,
+    run_helix_voice_search_by_audio_test,
     run_knowledge_crud_test,
     run_knowledge_document_crud_test,
+    run_llm_chat_completions_test,
     run_llm_embeddings_test,
     run_llm_visual_completions_test,
 )
@@ -165,6 +168,9 @@ def main():
             run_chat_tabular_stream_test,
             run_llm_visual_completions_test,
             run_helix_enrollment_test,
+            run_asura_speech_zero_shot_test,
+            run_helix_voice_search_by_audio_test,
+            run_llm_chat_completions_test,
         ):
             write_findings = run_test(entries, api_base_url, args.token)
             findings.extend(write_findings)

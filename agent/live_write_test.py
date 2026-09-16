@@ -515,8 +515,11 @@ def run_faq_entry_crud_test(entries, api_base_url, token, timeout=30):
     base = api_base_url.rstrip("/")
 
     # Step 0：建立一個臨時的父層 FAQ 容器，entry 要掛在某個 faqId 底下才能測
+    # 名稱加隨機後綴：固定名稱如果跟前一次沒清乾淨的殘留容器同名，建立時會撞 409（見
+    # _prepare_knowledge_params 的說明），這裡跟那邊用同一套做法避免撞名。
+    faq_container_name = TEST_TITLE + f"（entry 測試用容器 {uuid.uuid4().hex[:8]}）"
     try:
-        resp = session.post(f"{base}{faqs_path}", json={"faq": {"name": TEST_TITLE + "（entry 測試用容器）"}}, timeout=timeout)
+        resp = session.post(f"{base}{faqs_path}", json={"faq": {"name": faq_container_name}}, timeout=timeout)
     except requests.RequestException as exc:
         findings.append(_finding("live_write_error", "error", filename, group, f"POST 建立測試用父層 FAQ 失敗：{exc}", path=faqs_path, method="POST"))
         return findings
@@ -745,10 +748,13 @@ def run_knowledge_document_crud_test(entries, api_base_url, token, timeout=30):
     origin = base[: -len("/api")] if base.endswith("/api") else base
 
     # Step 0：建立一個臨時的知識庫容器
+    # 名稱加隨機後綴，避免跟前一次沒清乾淨的殘留容器撞名（見 _prepare_knowledge_params 的說明；
+    # 這支測試本來就只有單一呼叫者，但如果前一次執行的容器卡在索引中很久沒被清掉，一樣會撞 409）。
+    knowledge_container_name = TEST_TITLE + f"（document 測試用容器 {uuid.uuid4().hex[:8]}）"
     try:
         resp = session.post(
             f"{base}{knowledges_path}",
-            json={"knowledge": {"name": TEST_TITLE + "（document 測試用容器）", "description": "[agent-test] 用於驗證文件上傳，測試完會刪除"}},
+            json={"knowledge": {"name": knowledge_container_name, "description": "[agent-test] 用於驗證文件上傳，測試完會刪除"}},
             timeout=timeout,
         )
     except requests.RequestException as exc:
@@ -2110,8 +2116,11 @@ def _prepare_faq_params(session, base, timeout, findings):
     faqs_path = "/public/faq/v1/faqs"
     filename, group = "chat-v2.yaml", "Chat V2"
 
+    # 名稱加隨機後綴：這個 helper 被 faq 的一般版與串流版兩個測試各呼叫一次，固定名稱在
+    # 前一次沒清乾淨時會撞 409（跟 _prepare_knowledge_params 是同一個根因）。
+    faq_name = TEST_TITLE + f"（chat mode 測試用 {uuid.uuid4().hex[:8]}）"
     try:
-        resp = session.post(f"{base}{faqs_path}", json={"faq": {"name": TEST_TITLE + "（chat mode 測試用）"}}, timeout=timeout)
+        resp = session.post(f"{base}{faqs_path}", json={"faq": {"name": faq_name}}, timeout=timeout)
     except requests.RequestException as exc:
         findings.append(_finding("live_write_error", "error", filename, group, f"POST 建立測試用 FAQ 失敗：{exc}", path=faqs_path, method="POST"))
         return None, None
@@ -3168,5 +3177,381 @@ def run_helix_enrollment_test(entries, api_base_url, token, timeout=60):
 
     if not any(f["rule"].startswith("live_write_") and f["severity"] == "error" for f in findings):
         findings.append(_finding("live_write_ok", "info", filename, group, f"專用測試帳號的 POST 註冊 → GET 驗證 → DELETE → GET 驗證清空全部驗證通過（voiceId={voice_id}）"))
+
+    return findings
+
+
+def run_asura_speech_zero_shot_test(entries, api_base_url, token, timeout=60):
+    """測試 Asura V1 的零樣本語音克隆（`POST /asura/v1/speeches:zero-shot`）。
+
+    需要 config.HELIX_TEST_AUDIO_PATH 指到一個本機真的音檔，當作音色範本上傳（跟 Helix
+    voices / Asura 轉錄測試共用同一個音檔設定）；沒有設定就跳過測試，不是失敗。
+
+    無狀態呼叫，回應是音訊二進位資料不是 JSON，不需要清理這支端點本身；但上傳範本音檔
+    走的是 Asura 自己的 `/transcriptions:presign`（spec 明講這支 presign 同時服務轉錄與
+    這裡的音色範本），一樣沒有刪除或查詢端點，會留一筆永久殘留的 finding。
+
+    這個部署可能沒開這支端點（跟固定音色版一樣，404 視為「環境沒這個功能」而跳過）。
+    modelConfig.model 沿用 run_asura_tts_test 已經確認在這個環境可用的 tts-general-1.3.3；
+    如果零樣本版本其實要用不同的模型名稱而失敗，會記成新的 spec 落差，不會亂猜其他名字。
+    `promptText`（音檔的逐字稿）是選填欄位，這裡沒有精確逐字稿就不填，不影響呼叫成不成功，
+    只影響合成音色像不像範本，不在這支 API 正確性測試的範圍內。
+    """
+    from .config import HELIX_TEST_AUDIO_PATH
+
+    findings = []
+    filename, group = "asura-v1.yaml", "Asura V1"
+
+    if not HELIX_TEST_AUDIO_PATH or not os.path.isfile(HELIX_TEST_AUDIO_PATH):
+        findings.append(_finding("live_write_skipped", "info", filename, group, "沒有設定 HELIX_TEST_AUDIO_PATH 或檔案不存在，跳過零樣本語音克隆測試"))
+        return findings
+
+    entry = next((e for e in entries if e.get("filename") == filename and e.get("spec")), None)
+    if not entry:
+        findings.append(_finding("live_write_skipped", "info", filename, group, f"找不到 {filename} 的 spec，跳過寫入測試"))
+        return findings
+
+    spec = entry["spec"]
+    paths = spec.get("paths") or {}
+
+    def op_of(path, method):
+        op = paths[path][method]
+        op["__spec__"] = spec
+        return op
+
+    zero_shot_path = "/public/asura/v1/speeches:zero-shot"
+    presign_path = "/public/asura/v1/transcriptions:presign"
+
+    session = requests.Session()
+    session.headers.update({"X-Access-Token": token, "Content-Type": "application/json"})
+    base = api_base_url.rstrip("/")
+
+    test_filename = "[agent-test]-zero-shot-prompt-" + os.path.basename(HELIX_TEST_AUDIO_PATH)
+    content_type = "audio/aac"  # 跟轉錄測試一樣：mimetypes 猜出來的 MIME type 不在 Asura presign 收的清單裡
+    with open(HELIX_TEST_AUDIO_PATH, "rb") as fh:
+        audio_bytes = fh.read()
+
+    asset_key = _asset_v2_presign_and_upload(
+        session,
+        base,
+        timeout,
+        findings,
+        filename=test_filename,
+        content_type=content_type,
+        content=audio_bytes,
+        presign_path=presign_path,
+        presign_spec_label=(filename, group),
+    )
+    if not asset_key:
+        return findings
+
+    body = {
+        "input": {"text": "[agent-test] live-call 零樣本語音克隆驗證", "type": "text", "promptVoiceAssetKey": asset_key},
+        "modelConfig": {"model": "tts-general-1.3.3"},
+    }
+
+    try:
+        resp = session.post(f"{base}{zero_shot_path}", json=body, timeout=timeout)
+    except requests.RequestException as exc:
+        findings.append(_finding("live_write_error", "error", filename, group, f"POST 零樣本語音克隆失敗：{exc}", path=zero_shot_path, method="POST"))
+        return findings
+
+    if _is_permission_denied(resp):
+        findings.append(_finding("live_write_skipped", "info", filename, group, f"測試帳號沒有呼叫零樣本語音克隆的權限（{resp.status_code}），跳過這組測試", path=zero_shot_path, method="POST"))
+        return findings
+
+    if resp.status_code == 404:
+        findings.append(_finding("live_write_skipped", "info", filename, group, "這個部署沒有啟用零樣本語音克隆（404），跳過這組測試", path=zero_shot_path, method="POST"))
+        return findings
+
+    ok = _check_status_and_schema(op_of(zero_shot_path, "post"), resp, findings, filename, group, zero_shot_path, "post")
+    if not ok or resp.status_code != 200:
+        try:
+            resp_reason = resp.json().get("reason", "")
+        except ValueError:
+            resp_reason = ""
+        if resp_reason == "inferno.get-model.failed":
+            findings.append(
+                _finding(
+                    "spec_description_mismatch",
+                    "warning",
+                    filename,
+                    group,
+                    f"零樣本語音克隆用固定音色版已經驗證可用的模型（{body['modelConfig']['model']!r}），這裡卻查不到模型（{resp_reason}）——"
+                    "代表兩支 TTS 端點的模型清單不是共用的，spec 沒有講清楚這點，也沒有端點可以查零樣本版本實際支援的模型名稱",
+                    path=zero_shot_path,
+                    method="POST",
+                )
+            )
+        findings.append(_finding("live_write_aborted", "error", filename, group, f"POST 零樣本語音克隆沒有回 200（實際 {resp.status_code}）：{resp.text[:300]}，中止測試", path=zero_shot_path, method="POST"))
+        return findings
+
+    content_type_resp = resp.headers.get("Content-Type", "")
+    if "audio" not in content_type_resp:
+        findings.append(_finding("live_write_data_mismatch", "error", filename, group, f"回應 Content-Type 是 {content_type_resp!r}，預期是 audio/*", path=zero_shot_path, method="POST"))
+    elif len(resp.content) == 0:
+        findings.append(_finding("live_write_data_mismatch", "error", filename, group, "回應的音訊內容是空的", path=zero_shot_path, method="POST"))
+
+    if not any(f["rule"].startswith("live_write_") and f["severity"] == "error" for f in findings):
+        findings.append(_finding("live_write_ok", "info", filename, group, f"零樣本語音克隆呼叫成功，收到 {len(resp.content)} bytes 的 {content_type_resp} 音訊"))
+
+    return findings
+
+
+def run_helix_voice_search_by_audio_test(entries, api_base_url, token, timeout=1800):
+    """測試 Helix V1 的 `POST /helix/v1/voices:searchByAudio`（用一段錄音搜尋既有聲紋）。
+
+    需要先有至少一個 voiceId 可以搜尋（`voiceIds` 是必填且不能是空陣列）。這裡跟
+    `run_helix_voice_crud_test` 用同一套流程臨時建一個聲紋：Asset V2 presign → 上傳 →
+    把 assetKey 直接當 audioUris 送給 `POST /voices`。**這步本身有已知的不穩定性**（同一份
+    assetKey 有時候能用、有時候回 502），如果這裡失敗就直接跳過整組測試，不會另外想辦法
+    繞過去，避免把不穩定的建立流程誤判成 searchByAudio 本身的問題。
+
+    spec 說這支端點是同步的，語音辨識 + 聲紋比對整條跑完才回應，伺服器端每一步上限 30
+    分鐘——這裡的 timeout 給到 30 分鐘只是不要因為 client 太早放棄而誤判失敗，測試音檔本身
+    很短，實際應該幾秒到一分鐘內就回來。不要求真的比對到人（`matches` 是空陣列也算正常），
+    只驗證回應格式符合 schema。
+
+    測完會 DELETE 掉臨時建立的聲紋，確認清除乾淨。
+    """
+    findings = []
+    filename, group = "helix-v1.yaml", "Helix V1"
+    asset_filename, asset_group = "asset-v2.yaml", "Asset V2"
+
+    from .config import HELIX_TEST_AUDIO_PATH
+
+    if not HELIX_TEST_AUDIO_PATH or not os.path.isfile(HELIX_TEST_AUDIO_PATH):
+        findings.append(_finding("live_write_skipped", "info", filename, group, "沒有設定 HELIX_TEST_AUDIO_PATH 或檔案不存在，跳過 voices:searchByAudio 測試"))
+        return findings
+
+    entry = next((e for e in entries if e.get("filename") == filename and e.get("spec")), None)
+    if not entry:
+        findings.append(_finding("live_write_skipped", "info", filename, group, f"找不到 {filename} 的 spec，跳過寫入測試"))
+        return findings
+
+    spec = entry["spec"]
+    paths = spec.get("paths") or {}
+
+    def op_of(path, method):
+        op = paths[path][method]
+        op["__spec__"] = spec
+        return op
+
+    voices_path = "/public/helix/v1/voices"
+    voice_item_path_template = "/public/helix/v1/voices/{voiceId}"
+    search_path = "/public/helix/v1/voices:searchByAudio"
+
+    session = requests.Session()
+    session.headers.update({"X-Access-Token": token, "Content-Type": "application/json"})
+    base = api_base_url.rstrip("/")
+
+    test_filename = "[agent-test]-searchByAudio-" + os.path.basename(HELIX_TEST_AUDIO_PATH)
+    content_type = "audio/aac"
+    with open(HELIX_TEST_AUDIO_PATH, "rb") as fh:
+        audio_bytes = fh.read()
+
+    # Step 1：建立一個臨時聲紋當搜尋目標（沿用 run_helix_voice_crud_test 的做法）
+    asset_key = _asset_v2_presign_and_upload(session, base, timeout, findings, filename=test_filename, content_type=content_type, content=audio_bytes)
+    if not asset_key:
+        return findings
+
+    try:
+        resp = session.post(f"{base}{voices_path}", json={"audioUris": [asset_key]}, timeout=timeout)
+    except requests.RequestException as exc:
+        findings.append(_finding("live_write_error", "error", filename, group, f"POST 建立聲紋失敗：{exc}", path=voices_path, method="POST"))
+        return findings
+
+    if _is_permission_denied(resp):
+        findings.append(_finding("live_write_skipped", "info", filename, group, f"測試帳號沒有建立聲紋的權限（{resp.status_code}），跳過這組測試", path=voices_path, method="POST"))
+        return findings
+
+    if resp.status_code != 200:
+        findings.append(
+            _finding(
+                "live_write_skipped",
+                "info",
+                filename,
+                group,
+                f"建立測試用聲紋失敗（{resp.status_code}），這是已知的 assetKey/audioUris 銜接不穩定問題（見 run_helix_voice_crud_test 的說明），跳過 searchByAudio 測試",
+                path=voices_path,
+                method="POST",
+            )
+        )
+        return findings
+
+    try:
+        voice_id = resp.json()["voiceId"]
+    except Exception as exc:  # noqa: BLE001
+        findings.append(_finding("live_write_aborted", "error", filename, group, f"POST 回應裡拿不到 voiceId：{exc}", path=voices_path, method="POST"))
+        return findings
+
+    voice_item_path = voice_item_path_template.replace("{voiceId}", voice_id)
+
+    def cleanup():
+        try:
+            resp = session.delete(f"{base}{voice_item_path}", timeout=timeout)
+            if resp.status_code != 200:
+                findings.append(_finding("live_write_cleanup_failed", "error", filename, group, f"清理測試用聲紋（{voice_id}）失敗，DELETE 回 {resp.status_code}，需要手動清理", path=voice_item_path, method="DELETE"))
+        except requests.RequestException as exc:
+            findings.append(_finding("live_write_cleanup_failed", "error", filename, group, f"清理測試用聲紋（{voice_id}）失敗：{exc}，需要手動清理", path=voice_item_path, method="DELETE"))
+
+    # Step 2：searchByAudio——用同一份音檔的 assetKey 當 audioUri，搜尋剛剛建立的 voiceId
+    try:
+        resp = session.post(f"{base}{search_path}", json={"audioUri": asset_key, "voiceIds": [voice_id]}, timeout=timeout)
+    except requests.RequestException as exc:
+        findings.append(_finding("live_write_error", "error", filename, group, f"POST voices:searchByAudio 失敗：{exc}", path=search_path, method="POST"))
+        cleanup()
+        return findings
+
+    if resp.status_code != 200:
+        findings.append(
+            _finding(
+                "live_write_aborted",
+                "error",
+                filename,
+                group,
+                f"POST voices:searchByAudio 沒有回 200（實際 {resp.status_code}）：{resp.text[:300]}，中止測試（仍會清理臨時聲紋）",
+                path=search_path,
+                method="POST",
+            )
+        )
+        cleanup()
+        return findings
+
+    ok = _check_status_and_schema(op_of(search_path, "post"), resp, findings, filename, group, search_path, "post")
+    if ok:
+        try:
+            body = resp.json()
+            sentence_speaker_ids = {s.get("speakerId") for s in (body.get("sentences") or [])}
+            speaker_ids = {s.get("speakerId") for s in (body.get("speakers") or [])}
+            missing = sentence_speaker_ids - speaker_ids
+            if missing:
+                findings.append(
+                    _finding(
+                        "spec_description_mismatch",
+                        "warning",
+                        filename,
+                        group,
+                        f"spec 說 sentences 裡出現過的每個 speakerId 都保證會出現在 speakers 裡，但實測有 {sorted(missing)} 沒對到",
+                        path=search_path,
+                        method="POST",
+                    )
+                )
+        except Exception as exc:  # noqa: BLE001
+            findings.append(_finding("live_write_aborted", "error", filename, group, f"解析 voices:searchByAudio 回應失敗：{exc}", path=search_path, method="POST"))
+
+    cleanup()
+
+    if not any(f["rule"].startswith("live_write_") and f["severity"] == "error" for f in findings):
+        findings.append(_finding("live_write_ok", "info", filename, group, f"searchByAudio 呼叫成功、回應格式驗證通過，臨時聲紋（{voice_id}）已清除乾淨"))
+
+    return findings
+
+
+def run_llm_chat_completions_test(entries, api_base_url, token, timeout=60):
+    """測試 LLM V1 的文字對話（`POST /llm/v1/fedgpt/v1/chat/completions`，OpenAI 相容）。
+
+    先 `GET /llm/v1/fedgpt/v1/models` 拿模型清單：**第一筆是代稱**（解到本部署當下的預設
+    模型），優先用它；spec 提到代稱在模型只有部分 replica 就緒時可能回 404，這時改用清單
+    第二筆（帶版號的模型 ID）重試一次——這是文件自己建議的容錯方式，不是亂猜。
+
+    無狀態呼叫，不需要清理；跟 Chat V2 的測試一樣，這支會有真實的 LLM API 用量／成本，
+    所以 `max_tokens` 特意設小。
+    """
+    findings = []
+    filename, group = "llm-v1.yaml", "LLM V1"
+    entry = next((e for e in entries if e.get("filename") == filename and e.get("spec")), None)
+    if not entry:
+        findings.append(_finding("live_write_skipped", "info", filename, group, f"找不到 {filename} 的 spec，跳過寫入測試"))
+        return findings
+
+    spec = entry["spec"]
+    paths = spec.get("paths") or {}
+
+    def op_of(path, method):
+        op = paths[path][method]
+        op["__spec__"] = spec
+        return op
+
+    models_path = "/public/llm/v1/fedgpt/v1/models"
+    completions_path = "/public/llm/v1/fedgpt/v1/chat/completions"
+
+    session = requests.Session()
+    session.headers.update({"X-Access-Token": token, "Content-Type": "application/json"})
+    base = api_base_url.rstrip("/")
+
+    try:
+        resp = session.get(f"{base}{models_path}", timeout=timeout)
+    except requests.RequestException as exc:
+        findings.append(_finding("live_write_error", "error", filename, group, f"GET 模型清單失敗：{exc}", path=models_path, method="GET"))
+        return findings
+
+    if _is_permission_denied(resp):
+        findings.append(_finding("live_write_skipped", "info", filename, group, f"測試帳號沒有讀取模型清單的權限（{resp.status_code}），跳過這組測試", path=models_path, method="GET"))
+        return findings
+
+    if resp.status_code != 200:
+        findings.append(_finding("live_write_aborted", "error", filename, group, f"GET 模型清單沒有回 200（實際 {resp.status_code}），跳過這組測試", path=models_path, method="GET"))
+        return findings
+
+    try:
+        model_ids = [m["id"] for m in resp.json().get("data") or []]
+    except Exception as exc:  # noqa: BLE001
+        findings.append(_finding("live_write_aborted", "error", filename, group, f"解析模型清單失敗：{exc}", path=models_path, method="GET"))
+        return findings
+
+    if not model_ids:
+        findings.append(_finding("live_write_skipped", "info", filename, group, "模型清單是空的（沒有任何模型上線），跳過這組測試", path=models_path, method="GET"))
+        return findings
+
+    candidates = [model_ids[0]] + ([model_ids[1]] if len(model_ids) > 1 else [])
+    body = {
+        "model": None,
+        "messages": [{"role": "user", "content": "[agent-test] live-call chat completions 驗證，請用一句話回覆收到了"}],
+        "max_tokens": 16,
+    }
+
+    resp = None
+    for model_id in candidates:
+        body["model"] = model_id
+        try:
+            resp = session.post(f"{base}{completions_path}", json=body, timeout=timeout)
+        except requests.RequestException as exc:
+            findings.append(_finding("live_write_error", "error", filename, group, f"POST chat completions 失敗：{exc}", path=completions_path, method="POST"))
+            return findings
+        if resp.status_code != 404:
+            break
+        # 代稱在模型只有部分 replica 就緒時會回 404，spec 建議這時改用帶版號的模型 ID 重試——
+        # 只在清單第一筆（代稱）失敗時重試一次，不無限重試。
+
+    if _is_permission_denied(resp):
+        findings.append(_finding("live_write_skipped", "info", filename, group, f"測試帳號沒有呼叫 chat completions 的權限（{resp.status_code}），跳過這組測試", path=completions_path, method="POST"))
+        return findings
+
+    ok = _check_status_and_schema(op_of(completions_path, "post"), resp, findings, filename, group, completions_path, "post")
+    if not ok or resp.status_code != 200:
+        findings.append(
+            _finding(
+                "live_write_aborted",
+                "error",
+                filename,
+                group,
+                f"POST chat completions 沒有回 200（實際 {resp.status_code}，用的模型是 {body['model']!r}），中止測試",
+                path=completions_path,
+                method="POST",
+            )
+        )
+        return findings
+
+    try:
+        choices = resp.json().get("choices") or []
+        if not choices or not (choices[0].get("message") or {}).get("content"):
+            findings.append(_finding("live_write_data_mismatch", "error", filename, group, "回應的 choices 是空的，或第一個 choice 沒有 message.content", path=completions_path, method="POST"))
+    except Exception as exc:  # noqa: BLE001
+        findings.append(_finding("live_write_aborted", "error", filename, group, f"解析 chat completions 回應失敗：{exc}", path=completions_path, method="POST"))
+        return findings
+
+    if not any(f["rule"].startswith("live_write_") and f["severity"] == "error" for f in findings):
+        findings.append(_finding("live_write_ok", "info", filename, group, f"chat completions 呼叫成功（model={body['model']}）"))
 
     return findings
