@@ -3226,6 +3226,34 @@ def run_asura_speech_zero_shot_test(entries, api_base_url, token, timeout=60):
     session.headers.update({"X-Access-Token": token, "Content-Type": "application/json"})
     base = api_base_url.rstrip("/")
 
+    # Step 0：故意不帶 promptVoiceUrl/promptVoiceAssetKey，實測 spec 沒把它們標必填是否屬實
+    # （ZeroShotSpeechInput.input 的 required 只列了 text）。
+    try:
+        probe_resp = session.post(
+            f"{base}{zero_shot_path}",
+            json={"input": {"text": "[agent-test] 探測用，不帶語音範本"}, "modelConfig": {"model": "tts-general-1.3.3"}},
+            timeout=timeout,
+        )
+        if probe_resp.status_code not in (200, 404):
+            try:
+                probe_msg = probe_resp.json().get("message", "")
+            except ValueError:
+                probe_msg = ""
+            findings.append(
+                _finding(
+                    "spec_description_mismatch",
+                    "warning",
+                    filename,
+                    group,
+                    f"spec 的 ZeroShotSpeechInput.input 只把 text 標成必填，promptVoiceUrl/promptVoiceAssetKey 兩個都是選填，"
+                    f"但兩個都不帶實際回應是 {probe_resp.status_code}：{probe_msg}——代表伺服器端其實兩者擇一是必填",
+                    path=zero_shot_path,
+                    method="POST",
+                )
+            )
+    except requests.RequestException:
+        pass  # 這只是探測性質，失敗不影響下面正式測試
+
     test_filename = "[agent-test]-zero-shot-prompt-" + os.path.basename(HELIX_TEST_AUDIO_PATH)
     content_type = "audio/aac"  # 跟轉錄測試一樣：mimetypes 猜出來的 MIME type 不在 Asura presign 收的清單裡
     with open(HELIX_TEST_AUDIO_PATH, "rb") as fh:
@@ -3279,6 +3307,30 @@ def run_asura_speech_zero_shot_test(entries, api_base_url, token, timeout=60):
                     group,
                     f"零樣本語音克隆用固定音色版已經驗證可用的模型（{body['modelConfig']['model']!r}），這裡卻查不到模型（{resp_reason}）——"
                     "代表兩支 TTS 端點的模型清單不是共用的，spec 沒有講清楚這點，也沒有端點可以查零樣本版本實際支援的模型名稱",
+                    path=zero_shot_path,
+                    method="POST",
+                )
+            )
+        elif resp_reason == "data.unhandled" and resp.status_code == 500:
+            # 手動診斷過（不是每次自動測試都重跑，成本較高）：拿掉 promptVoiceAssetKey 只送
+            # text 會回乾淨的 400（value length must be at least 1 characters，代表 spec 沒
+            # 標必填其實是必填）；帶對的話不管填 promptVoiceAssetKey（走 spec 建議的
+            # transcriptions:presign 流程）還是填一個已經驗證能用的真實 promptVoiceUrl（同一份
+            # 檔案用同一個 assetKey 打 /transcriptions 可以正常解析、成功建立轉錄工作），兩種
+            # 格式都同樣回這個被吞掉細節的 500——代表壞的不是 assetKey 對不對、模型名稱對不對，
+            # 是這支端點處理「帶了語音範本」這條路徑本身有問題，比較像後端真的有 bug，不是文件寫錯。
+            findings.append(
+                _finding(
+                    "spec_description_mismatch",
+                    "warning",
+                    filename,
+                    group,
+                    "帶 promptVoiceAssetKey（照 spec 建議走 transcriptions:presign 上傳）一律回 500 "
+                    "{\"service\":\"http-gateway\",\"reason\":\"data.unhandled\",\"message\":\"unexpected status code: 400\"}"
+                    "——代表 http-gateway 轉呼叫上游時收到 400，但沒有處理這個狀態碼的邏輯，直接包成看不出原因的 500。"
+                    "手動排查過：同一個 assetKey 打 /transcriptions 可以正常解析成真實網址並成功建立轉錄工作，"
+                    "改填那個已驗證能連得到的 promptVoiceUrl 給這支端點一樣回同一個 500——不是 assetKey 或模型名稱的問題，"
+                    "是這支端點處理語音範本輸入的路徑本身壞了，比較像後端 bug 而不是文件寫錯",
                     path=zero_shot_path,
                     method="POST",
                 )
