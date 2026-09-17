@@ -28,6 +28,19 @@ Mac／Linux 上如果系統的 `python`/`pip` 沒有指到 Python 3，改用 `py
 | `GOOGLE_CHAT_WEBHOOK_URL` | `--notify` 推播用 | 目標 Google Chat Space → Apps & integrations → Webhooks |
 | `TEAMS_WEBHOOK_URL` | `--notify-teams` 推播用 | Teams 頻道/對話 → Workflows → 建一個 "When a Teams webhook request is received" 的 flow |
 
+### Token 過期怎麼辦
+
+上面這幾個 token（`FEDGPT_ACCESS_TOKEN`、`FEDGPT_STG2_TOKEN`、`HELIX_ENROLLMENT_TEST_TOKEN`）都會過期，或是帳號在別處登出就會被撤銷。**如果知道那個帳號的帳號密碼，可以自己打登入端點換一組新的**，不用等別人給：
+
+```bash
+curl -X POST https://fedgpt-stg2-vm1.corp.ailabs.tw/api/public/auth/v2/fedgpt/login \
+  -H "Content-Type: application/json" \
+  -d '{"authKey": "<帳號>", "authSecret": "<密碼>"}'
+```
+（打 dev 環境就把 base URL 換成 `https://fedgpt-dev.corp.ailabs.tw/api`；LDAP 帳號改打 `/public/auth/v2/ldap/login`。）回應的 `token` 欄位就是新的 access token，複製貼到 `.env` 對應的變數裡蓋掉舊的就好。
+
+`AUTH_LOGIN_TEST_USERNAME`/`AUTH_LOGIN_TEST_PASSWORD` 這組次要帳號本身沒有另外的帳號管理介面——密碼是多少、要不要換都是團隊內部自行決定，這個工具不負責建立或改密碼，**只要把目前實際有效的帳號密碼更新進 `.env` 就好**，不需要動到程式碼。
+
 ### 基本用法
 ```bash
 python run_check.py                    # 只做靜態比對 + 跟上次執行的 spec diff（不需要 token）
