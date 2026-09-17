@@ -182,8 +182,6 @@ Agent 能檢查出「這裡沒寫 description」，但**不負責猜測正確的
 | 狀態碼 | 檢查 Swagger 是否有定義完整的回應狀態碼（實際狀態碼是否正確待 live call 階段驗證） |
 | API 向下相容（自 3.10 起） | **改為「這次執行 vs. 上次執行」的 spec diff**（見下方 3.2 節）——3.10 版本大概率拿不到，放棄以它為 baseline，改成每次執行都跟上一次存的快照比對，抓破壞性變更 |
 
-> 待釐清：需要與 James Yang review 確認，哪些規則第一階段就能做到「純靜態比對」、哪些其實仍需要 live call 才能驗證。
-
 **補充發現**：實測發現幾乎所有端點都遵循 `/public/{service}/v{n}/...` 的命名慣例，這可以當作「這支算不算 public」的判斷依據之一。但也發現一個例外：`fedflow-v1.yaml` 同時有 `/public/fedflow/v1/flows/summary` 與不帶 `/public/` 前綴的 `/fedflow/v1/flows/summary`，經確認這是**刻意保留的相容路徑**，description 裡有明講「無前綴那條是早期整合留下的相容路徑，新接的整合請用帶 `/public` 前綴的那條」。這代表檢查規則不能只看「有沒有 `/public/` 前綴」，還要能分辨「有註明原因的例外」跟「真的漏標／漏寫」，避免誤判。
 
 ### 3.1 案例：description 缺漏的實際影響
@@ -293,7 +291,6 @@ Agent 能檢查出「這裡沒寫 description」，但**不負責猜測正確的
 **工具本身的 bug（非 spec 問題，記錄下來避免以後重踩）**：`_parse_sse_dialect_a` 一開始用 `resp.iter_lines(decode_unicode=True)` 解析 SSE 串流，`requests` 這個參數會在網路封包還沒重組成完整一行前就先解碼，中文字的 UTF-8 多位元組序列被切在封包邊界時會解碼壞掉、把一則 `data:` 誤判成兩行，導致 `chat/faq:stream`、`chat/tabular:stream` 這兩個「回應剛好含中文」的測試一直收不到任何 `event: data`。修正是改讀原始 bytes 再自己用 `\n` 分行（UTF-8 裡 `\n` 永遠是安全的分割點）、每行湊齊後才解碼。
 
 **營運上的注意事項（不是程式或 spec 問題）**：
-- 測試過程中 stg2 的 access token 曾經連續被撤銷（`auth.invalid-auth` / `token is revoked`）——事後確認**單純是那個帳號在別處登出了**，跟自動化測試的流量或行為無關，不用特別擔心觸發什麼異常偵測機制。換一組新 token 就能繼續。
 - 曾經遇過 Knowledge V3 文件的索引長時間停在 `doing` 不動、`DELETE` 回 `423 data.locked`（`"workflow already running"`），一度以為是 workflow 卡死，兩筆 `[agent-test]` 開頭的知識庫/文件清不掉。**後來追蹤到不是卡死，是索引跑得非常慢**——同一批文件事後查詢已經變成 `displayState: "completed"`，從建立到真的完成索引中間隔了將近 1 小時 45 分鐘。比較像是 stg2 索引服務有嚴重的排隊/延遲問題，不是 workflow 真的壞掉；再遇到的話，只要等夠久（不是等幾分鐘，是等一兩個小時）通常就能正常刪除，不需要手動介入。
 - 前一項的延遲間接暴露了測試程式碼自己的問題：好幾支測試用**固定字串**當臨時資源的名稱（如「...（chat mode 測試用）」），如果前一次執行建立的資源因為上面這個延遲還沒被清乾淨，下一次執行用同樣名稱建立會撞 `409 conflict`，連帶讓那組測試被跳過。修法是幫這些固定名稱都加上一段隨機後綴（`uuid.uuid4().hex[:8]`），讓同名容器不再互相卡到；已經套用到 Knowledge/FAQ 兩個 chat-mode 用的臨時容器，以及 FAQ entry 測試、Knowledge document 測試各自用的臨時容器。
 
@@ -308,7 +305,7 @@ Agent 能檢查出「這裡沒寫 description」，但**不負責猜測正確的
 2.「跟上次執行比對」取代 3.10 baseline（見 3.2 節）。
 3. Jira 開票的目標 project、issue type、必填欄位規則。
 4. HTML report 的呈現內容與對象（給 PJM 看？給開發看？）。
-5. ~~Live call 驗證（第二階段）的啟動時機與範圍~~ — 已啟動 GET 部分並實測 dev/stg2 環境，也已擴大到 POST/PUT/DELETE（見第 7 節，30 組寫入測試全部驗證通過或正常跳過，46 個公開寫入端點全數涵蓋，涵蓋 Chat/FAQ/Knowledge/FedFlow/Helix/Auth/Admin/LLM/Asura，含四個資源型 mode 的一次性與串流版本、Helix 用錄音搜尋聲紋、LLM 直接 chat completions、Auth V2 的 login/logout，以及用獨立測試帳號測到的 Helix `/enrollment`）。目前已知的公開端點全部涵蓋，沒有刻意排除的項目。累積抓到的真實文件/行為落差、以及營運上的注意事項（token 撤銷、知識庫索引異常緩慢、測試資源固定命名撞名）列在第 7 節。
+5. 已啟動 GET 部分並實測 dev/stg2 環境，也已擴大到 POST/PUT/DELETE（見第 7 節，30 組寫入測試全部驗證通過或正常跳過，46 個公開寫入端點全數涵蓋，涵蓋 Chat/FAQ/Knowledge/FedFlow/Helix/Auth/Admin/LLM/Asura，含四個資源型 mode 的一次性與串流版本、Helix 用錄音搜尋聲紋、LLM 直接 chat completions、Auth V2 的 login/logout，以及用獨立測試帳號測到的 Helix `/enrollment`）。目前已知的公開端點全部涵蓋，沒有刻意排除的項目。累積抓到的真實文件/行為落差、以及營運上的注意事項（token 撤銷、知識庫索引異常緩慢、測試資源固定命名撞名）列在第 7 節。
 6. CI / 排程整合的時間點——現在有了「跟上次執行比對」的機制後，這點變得更重要：要多久固定跑一次，才不會讓兩次執行之間累積太多變化，待後續討論再定案。
 
 ---
@@ -316,5 +313,4 @@ Agent 能檢查出「這裡沒寫 description」，但**不負責猜測正確的
 ## 下一步
 
 1. 補齊第 3 節「檢查規則」的細節定義（哪些規則第一階段可行）。
-2. 找 **James Yang** discuss & review，cc Jessica Kao、Winter Deng。
-3. Review 後正式謄寫為 Confluence 頁面，回填 ticket [FEDGPT-15990](https://ailabstw.atlassian.net/browse/FEDGPT-15990)。
+2. Review 後正式謄寫為 Confluence 頁面，回填 ticket [FEDGPT-15990](https://ailabstw.atlassian.net/browse/FEDGPT-15990)。
