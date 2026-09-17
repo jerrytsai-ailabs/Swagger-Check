@@ -235,6 +235,40 @@ def _asset_v2_presign_and_upload(
     return asset_key
 
 
+def _load_spec_for_test(entries, filename, group, findings):
+    """找出 filename 對應的已抓取 spec，回傳 (spec, paths)；找不到就記一筆 live_write_skipped 並回傳 (None, None)。"""
+    entry = next((e for e in entries if e.get("filename") == filename and e.get("spec")), None)
+    if not entry:
+        findings.append(_finding("live_write_skipped", "info", filename, group, f"找不到 {filename} 的 spec，跳過寫入測試"))
+        return None, None
+    spec = entry["spec"]
+    paths = spec.get("paths") or {}
+    return spec, paths
+
+
+def _make_op_of(spec, paths):
+    """回傳一個 op_of(path, method) closure；順便把 spec 參照夾帶進 op dict，方便 schema 解析時用（測試腳本內部用，不影響 spec 本身語意）。"""
+
+    def op_of(path, method):
+        op = paths[path][method]
+        op["__spec__"] = spec
+        return op
+
+    return op_of
+
+
+def _make_session(token):
+    session = requests.Session()
+    session.headers.update({"X-Access-Token": token, "Content-Type": "application/json"})
+    return session
+
+
+def _finalize_ok(findings, filename, group, message):
+    """目前為止沒有任何 error 等級的 live_write_ 開頭 finding 的話，補一筆 live_write_ok。"""
+    if not any(f["rule"].startswith("live_write_") and f["severity"] == "error" for f in findings):
+        findings.append(_finding("live_write_ok", "info", filename, group, message))
+
+
 def _run_simple_crud_test(
     entries,
     api_base_url,
@@ -254,21 +288,12 @@ def _run_simple_crud_test(
 ):
     """跑一輪 POST -> GET -> PUT -> GET -> DELETE -> GET，回傳 findings。"""
     findings = []
-    entry = next((e for e in entries if e.get("filename") == filename and e.get("spec")), None)
-    if not entry:
-        findings.append(_finding("live_write_skipped", "info", filename, group, f"找不到 {filename} 的 spec，跳過寫入測試"))
+    spec, paths = _load_spec_for_test(entries, filename, group, findings)
+    if spec is None:
         return findings
+    op_of = _make_op_of(spec, paths)
 
-    spec = entry["spec"]
-    paths = spec.get("paths") or {}
-
-    def op_of(path, method):
-        op = paths[path][method]
-        op["__spec__"] = spec  # 借用 op dict 夾帶 spec 參照，方便 schema 解析時用（測試腳本內部用，不影響 spec 本身語意）
-        return op
-
-    session = requests.Session()
-    session.headers.update({"X-Access-Token": token, "Content-Type": "application/json"})
+    session = _make_session(token)
     base = api_base_url.rstrip("/")
 
     extra_fields = dict(extra_create_fields or {})
@@ -417,16 +442,7 @@ def _run_simple_crud_test(
         except requests.RequestException as exc:
             findings.append(_finding("live_write_error", "warning", filename, group, f"GET 驗證刪除結果失敗：{exc}", path=item_path_template, method="GET"))
 
-    if not any(f["rule"].startswith("live_write_") and f["severity"] == "error" for f in findings):
-        findings.append(
-            _finding(
-                "live_write_ok",
-                "info",
-                filename,
-                group,
-                f"POST → GET → PUT → GET → DELETE → GET 全部驗證通過，測試資料（{resource_id}）已清除乾淨",
-            )
-        )
+    _finalize_ok(findings, filename, group, f"POST → GET → PUT → GET → DELETE → GET 全部驗證通過，測試資料（{resource_id}）已清除乾淨")
 
     return findings
 
@@ -510,8 +526,7 @@ def run_faq_entry_crud_test(entries, api_base_url, token, timeout=30):
         op["__spec__"] = spec
         return op
 
-    session = requests.Session()
-    session.headers.update({"X-Access-Token": token, "Content-Type": "application/json"})
+    session = _make_session(token)
     base = api_base_url.rstrip("/")
 
     # Step 0：建立一個臨時的父層 FAQ 容器，entry 要掛在某個 faqId 底下才能測
@@ -667,10 +682,7 @@ def run_faq_entry_crud_test(entries, api_base_url, token, timeout=30):
             _finding("live_write_cleanup_failed", "error", filename, group, f"清理測試用父層 FAQ（{faq_id}）失敗：{exc}，需要手動清理", path=faq_item_path_template, method="DELETE")
         )
 
-    if not any(f["rule"].startswith("live_write_") and f["severity"] == "error" for f in findings):
-        findings.append(
-            _finding("live_write_ok", "info", filename, group, f"entry 的 POST → GET → PUT → GET → DELETE → GET 全部驗證通過，測試容器（{faq_id}）已清除乾淨")
-        )
+    _finalize_ok(findings, filename, group, f"entry 的 POST → GET → PUT → GET → DELETE → GET 全部驗證通過，測試容器（{faq_id}）已清除乾淨")
 
     return findings
 
@@ -714,27 +726,13 @@ def run_knowledge_document_crud_test(entries, api_base_url, token, timeout=30):
     kb_filename, kb_group = "knowledge-v3.yaml", "Knowledge V3"
     asset_filename, asset_group = "asset-v2.yaml", "Asset V2"
 
-    kb_entry = next((e for e in entries if e.get("filename") == kb_filename and e.get("spec")), None)
-    asset_entry = next((e for e in entries if e.get("filename") == asset_filename and e.get("spec")), None)
-    if not kb_entry or not asset_entry:
-        missing = kb_filename if not kb_entry else asset_filename
-        findings.append(_finding("live_write_skipped", "info", missing, kb_group, f"找不到 {missing} 的 spec，跳過寫入測試"))
+    kb_spec, kb_paths = _load_spec_for_test(entries, kb_filename, kb_group, findings)
+    asset_spec, asset_paths = _load_spec_for_test(entries, asset_filename, asset_group, findings)
+    if kb_spec is None or asset_spec is None:
         return findings
 
-    kb_spec = kb_entry["spec"]
-    kb_paths = kb_spec.get("paths") or {}
-    asset_spec = asset_entry["spec"]
-    asset_paths = asset_spec.get("paths") or {}
-
-    def kb_op(path, method):
-        op = kb_paths[path][method]
-        op["__spec__"] = kb_spec
-        return op
-
-    def asset_op(path, method):
-        op = asset_paths[path][method]
-        op["__spec__"] = asset_spec
-        return op
+    kb_op = _make_op_of(kb_spec, kb_paths)
+    asset_op = _make_op_of(asset_spec, asset_paths)
 
     knowledges_path = "/public/knowledge/v3/knowledges"
     knowledge_item_path_template = "/public/knowledge/v3/knowledges/{knowledgeId}"
@@ -742,8 +740,7 @@ def run_knowledge_document_crud_test(entries, api_base_url, token, timeout=30):
     document_item_path_template = "/public/knowledge/v3/knowledges/{knowledgeId}/documents/{documentId}"
     presign_path = "/public/asset/v2/assets:presign"
 
-    session = requests.Session()
-    session.headers.update({"X-Access-Token": token, "Content-Type": "application/json"})
+    session = _make_session(token)
     base = api_base_url.rstrip("/")
     origin = base[: -len("/api")] if base.endswith("/api") else base
 
@@ -1050,10 +1047,7 @@ def run_knowledge_document_crud_test(entries, api_base_url, token, timeout=30):
             )
         )
 
-    if not any(f["rule"].startswith("live_write_") and f["severity"] == "error" for f in findings):
-        findings.append(
-            _finding("live_write_ok", "info", kb_filename, kb_group, f"文件的上傳 → 索引 → 驗證 → 刪除 → 確認清除全部驗證通過，測試容器（{knowledge_id}）已清除乾淨")
-        )
+    _finalize_ok(findings, kb_filename, kb_group, f"文件的上傳 → 索引 → 驗證 → 刪除 → 確認清除全部驗證通過，測試容器（{knowledge_id}）已清除乾淨")
 
     return findings
 
@@ -1072,23 +1066,14 @@ def run_fedflow_execute_test(entries, api_base_url, token, timeout=20, flow_id=N
     filename, group = "fedflow-v1.yaml", "FedFlow V1"
     flow_id = flow_id or FEDFLOW_TEST_FLOW_ID
 
-    entry = next((e for e in entries if e.get("filename") == filename and e.get("spec")), None)
-    if not entry:
-        findings.append(_finding("live_write_skipped", "info", filename, group, f"找不到 {filename} 的 spec，跳過寫入測試"))
+    spec, paths = _load_spec_for_test(entries, filename, group, findings)
+    if spec is None:
         return findings
-
-    spec = entry["spec"]
-    paths = spec.get("paths") or {}
+    op_of = _make_op_of(spec, paths)
     execute_path_template = "/public/fedflow/v1/flows/{flowId}/execute"
     result_path_template = "/public/fedflow/v1/executions/{executionId}/result"
 
-    def op_of(path, method):
-        op = paths[path][method]
-        op["__spec__"] = spec
-        return op
-
-    session = requests.Session()
-    session.headers.update({"X-Access-Token": token, "Content-Type": "application/json"})
+    session = _make_session(token)
     base = api_base_url.rstrip("/")
     execute_path = execute_path_template.replace("{flowId}", flow_id)
 
@@ -1183,16 +1168,7 @@ def run_fedflow_execute_test(entries, api_base_url, token, timeout=20, flow_id=N
         )
         return findings
 
-    if not any(f["rule"].startswith("live_write_") and f["severity"] == "error" for f in findings):
-        findings.append(
-            _finding(
-                "live_write_ok",
-                "info",
-                filename,
-                group,
-                f"POST execute → GET result 輪詢驗證通過，flow 執行成功結束（executionId={execution_id}）",
-            )
-        )
+    _finalize_ok(findings, filename, group, f"POST execute → GET result 輪詢驗證通過，flow 執行成功結束（executionId={execution_id}）")
 
     return findings
 
@@ -1222,34 +1198,19 @@ def run_helix_voice_crud_test(entries, api_base_url, token, timeout=60):
         findings.append(_finding("live_write_skipped", "info", filename, group, "沒有設定 HELIX_TEST_AUDIO_PATH 或檔案不存在，跳過 /voices 寫入測試"))
         return findings
 
-    kb_entry = next((e for e in entries if e.get("filename") == filename and e.get("spec")), None)
-    asset_entry = next((e for e in entries if e.get("filename") == asset_filename and e.get("spec")), None)
-    if not kb_entry or not asset_entry:
-        missing = filename if not kb_entry else asset_filename
-        findings.append(_finding("live_write_skipped", "info", missing, group, f"找不到 {missing} 的 spec，跳過寫入測試"))
+    spec, paths = _load_spec_for_test(entries, filename, group, findings)
+    asset_spec, asset_paths = _load_spec_for_test(entries, asset_filename, asset_group, findings)
+    if spec is None or asset_spec is None:
         return findings
 
-    spec = kb_entry["spec"]
-    paths = spec.get("paths") or {}
-    asset_spec = asset_entry["spec"]
-    asset_paths = asset_spec.get("paths") or {}
-
-    def op_of(path, method):
-        op = paths[path][method]
-        op["__spec__"] = spec
-        return op
-
-    def asset_op(path, method):
-        op = asset_paths[path][method]
-        op["__spec__"] = asset_spec
-        return op
+    op_of = _make_op_of(spec, paths)
+    asset_op = _make_op_of(asset_spec, asset_paths)
 
     voices_path = "/public/helix/v1/voices"
     voice_item_path_template = "/public/helix/v1/voices/{voiceId}"
     presign_path = "/public/asset/v2/assets:presign"
 
-    session = requests.Session()
-    session.headers.update({"X-Access-Token": token, "Content-Type": "application/json"})
+    session = _make_session(token)
     base = api_base_url.rstrip("/")
     origin = base[: -len("/api")] if base.endswith("/api") else base
 
@@ -1393,8 +1354,7 @@ def run_helix_voice_crud_test(entries, api_base_url, token, timeout=60):
         except requests.RequestException as exc:
             findings.append(_finding("live_write_error", "warning", filename, group, f"GET 驗證聲紋刪除結果失敗：{exc}", path=voice_item_path_template, method="GET"))
 
-    if not any(f["rule"].startswith("live_write_") and f["severity"] == "error" for f in findings):
-        findings.append(_finding("live_write_ok", "info", filename, group, f"聲紋的 POST → GET → DELETE → GET 全部驗證通過，測試資料（{voice_id}）已清除乾淨"))
+    _finalize_ok(findings, filename, group, f"聲紋的 POST → GET → DELETE → GET 全部驗證通過，測試資料（{voice_id}）已清除乾淨")
 
     return findings
 
@@ -1413,24 +1373,15 @@ def run_auth_apikey_crud_test(entries, api_base_url, token, timeout=30):
     """
     findings = []
     filename, group = "auth-v2.yaml", "Auth V2"
-    entry = next((e for e in entries if e.get("filename") == filename and e.get("spec")), None)
-    if not entry:
-        findings.append(_finding("live_write_skipped", "info", filename, group, f"找不到 {filename} 的 spec，跳過寫入測試"))
+    spec, paths = _load_spec_for_test(entries, filename, group, findings)
+    if spec is None:
         return findings
-
-    spec = entry["spec"]
-    paths = spec.get("paths") or {}
-
-    def op_of(path, method):
-        op = paths[path][method]
-        op["__spec__"] = spec
-        return op
+    op_of = _make_op_of(spec, paths)
 
     apikeys_path = "/public/auth/v2/apikeys"
     batch_delete_path = "/public/auth/v2/apikeys:batchDelete"
 
-    session = requests.Session()
-    session.headers.update({"X-Access-Token": token, "Content-Type": "application/json"})
+    session = _make_session(token)
     base = api_base_url.rstrip("/")
 
     # Step 1：建立一把效期很短的 key
@@ -1521,8 +1472,7 @@ def run_auth_apikey_crud_test(entries, api_base_url, token, timeout=30):
         except requests.RequestException as exc:
             findings.append(_finding("live_write_error", "warning", filename, group, f"GET 驗證刪除結果失敗：{exc}", path=apikeys_path, method="GET"))
 
-    if not any(f["rule"].startswith("live_write_") and f["severity"] == "error" for f in findings):
-        findings.append(_finding("live_write_ok", "info", filename, group, "API key 的 POST → GET → 批次 DELETE → GET 全部驗證通過，測試用的 key 已清除乾淨"))
+    _finalize_ok(findings, filename, group, "API key 的 POST → GET → 批次 DELETE → GET 全部驗證通過，測試用的 key 已清除乾淨")
 
     return findings
 
@@ -1534,22 +1484,13 @@ def run_llm_embeddings_test(entries, api_base_url, token, timeout=30):
     """
     findings = []
     filename, group = "llm-v1.yaml", "LLM V1"
-    entry = next((e for e in entries if e.get("filename") == filename and e.get("spec")), None)
-    if not entry:
-        findings.append(_finding("live_write_skipped", "info", filename, group, f"找不到 {filename} 的 spec，跳過寫入測試"))
+    spec, paths = _load_spec_for_test(entries, filename, group, findings)
+    if spec is None:
         return findings
-
-    spec = entry["spec"]
-    paths = spec.get("paths") or {}
-
-    def op_of(path, method):
-        op = paths[path][method]
-        op["__spec__"] = spec
-        return op
+    op_of = _make_op_of(spec, paths)
 
     embeddings_path = "/public/llm/v1/retriever/v1/embeddings"
-    session = requests.Session()
-    session.headers.update({"X-Access-Token": token, "Content-Type": "application/json"})
+    session = _make_session(token)
     base = api_base_url.rstrip("/")
 
     test_input = "[agent-test] live-call embeddings 驗證"
@@ -1581,8 +1522,7 @@ def run_llm_embeddings_test(entries, api_base_url, token, timeout=30):
         findings.append(_finding("live_write_aborted", "error", filename, group, f"解析 embeddings 回應失敗：{exc}", path=embeddings_path, method="POST"))
         return findings
 
-    if not any(f["rule"].startswith("live_write_") and f["severity"] == "error" for f in findings):
-        findings.append(_finding("live_write_ok", "info", filename, group, f"embeddings 呼叫成功，向量維度 {len(data[0]['embedding'])}，index 對應正確"))
+    _finalize_ok(findings, filename, group, f"embeddings 呼叫成功，向量維度 {len(data[0]['embedding'])}，index 對應正確")
 
     return findings
 
@@ -1599,22 +1539,13 @@ def run_asura_tts_test(entries, api_base_url, token, timeout=60):
     """
     findings = []
     filename, group = "asura-v1.yaml", "Asura V1"
-    entry = next((e for e in entries if e.get("filename") == filename and e.get("spec")), None)
-    if not entry:
-        findings.append(_finding("live_write_skipped", "info", filename, group, f"找不到 {filename} 的 spec，跳過寫入測試"))
+    spec, paths = _load_spec_for_test(entries, filename, group, findings)
+    if spec is None:
         return findings
-
-    spec = entry["spec"]
-    paths = spec.get("paths") or {}
-
-    def op_of(path, method):
-        op = paths[path][method]
-        op["__spec__"] = spec
-        return op
+    op_of = _make_op_of(spec, paths)
 
     tts_path = "/public/asura/v1/speeches:stream"
-    session = requests.Session()
-    session.headers.update({"X-Access-Token": token, "Content-Type": "application/json"})
+    session = _make_session(token)
     base = api_base_url.rstrip("/")
 
     base_body = {
@@ -1712,8 +1643,7 @@ def run_asura_tts_test(entries, api_base_url, token, timeout=60):
     elif len(resp.content) == 0:
         findings.append(_finding("live_write_data_mismatch", "error", filename, group, "回應的音訊內容是空的", path=tts_path, method="POST"))
 
-    if not any(f["rule"].startswith("live_write_") and f["severity"] == "error" for f in findings):
-        findings.append(_finding("live_write_ok", "info", filename, group, f"文字轉語音呼叫成功，收到 {len(resp.content)} bytes 的 {content_type} 音訊"))
+    _finalize_ok(findings, filename, group, f"文字轉語音呼叫成功，收到 {len(resp.content)} bytes 的 {content_type} 音訊")
 
     return findings
 
@@ -1727,26 +1657,17 @@ def run_chat_send_message_test(entries, api_base_url, token, timeout=90):
     """
     findings = []
     filename, group = "chat-v2.yaml", "Chat V2"
-    entry = next((e for e in entries if e.get("filename") == filename and e.get("spec")), None)
-    if not entry:
-        findings.append(_finding("live_write_skipped", "info", filename, group, f"找不到 {filename} 的 spec，跳過寫入測試"))
+    spec, paths = _load_spec_for_test(entries, filename, group, findings)
+    if spec is None:
         return findings
-
-    spec = entry["spec"]
-    paths = spec.get("paths") or {}
-
-    def op_of(path, method):
-        op = paths[path][method]
-        op["__spec__"] = spec
-        return op
+    op_of = _make_op_of(spec, paths)
 
     conversations_path = "/public/chat/v2/conversations"
     conversation_item_path_template = "/public/chat/v2/conversations/{convId}"
     chat_normal_path = "/public/chat/v2/chat/normal"
     models_path = "/public/chat/v2/models"
 
-    session = requests.Session()
-    session.headers.update({"X-Access-Token": token, "Content-Type": "application/json"})
+    session = _make_session(token)
     base = api_base_url.rstrip("/")
 
     try:
@@ -1836,8 +1757,7 @@ def run_chat_send_message_test(entries, api_base_url, token, timeout=90):
         except requests.RequestException as exc:
             findings.append(_finding("live_write_error", "warning", filename, group, f"GET 驗證刪除結果失敗：{exc}", path=conversation_item_path_template, method="GET"))
 
-    if not any(f["rule"].startswith("live_write_") and f["severity"] == "error" for f in findings):
-        findings.append(_finding("live_write_ok", "info", filename, group, f"送訊息 → 驗證回應 → 刪除臨時對話全部驗證通過（convId={conv_id}）"))
+    _finalize_ok(findings, filename, group, f"送訊息 → 驗證回應 → 刪除臨時對話全部驗證通過（convId={conv_id}）")
 
     return findings
 
@@ -1856,25 +1776,16 @@ def _run_chat_mode_test(entries, api_base_url, token, timeout, *, mode, chat_pat
     """
     findings = []
     filename, group = "chat-v2.yaml", "Chat V2"
-    entry = next((e for e in entries if e.get("filename") == filename and e.get("spec")), None)
-    if not entry:
-        findings.append(_finding("live_write_skipped", "info", filename, group, f"找不到 {filename} 的 spec，跳過寫入測試"))
+    spec, paths = _load_spec_for_test(entries, filename, group, findings)
+    if spec is None:
         return findings
-
-    spec = entry["spec"]
-    paths = spec.get("paths") or {}
-
-    def op_of(path, method):
-        op = paths[path][method]
-        op["__spec__"] = spec
-        return op
+    op_of = _make_op_of(spec, paths)
 
     conversations_path = "/public/chat/v2/conversations"
     conversation_item_path_template = "/public/chat/v2/conversations/{convId}"
     models_path = "/public/chat/v2/models"
 
-    session = requests.Session()
-    session.headers.update({"X-Access-Token": token, "Content-Type": "application/json"})
+    session = _make_session(token)
     base = api_base_url.rstrip("/")
 
     try:
@@ -1981,8 +1892,7 @@ def _run_chat_mode_test(entries, api_base_url, token, timeout, *, mode, chat_pat
         # 不論前面步驟結果如何，都嘗試清掉 prepare_params_fn 建立的臨時資源
         cleanup_fn()
 
-    if not any(f["rule"].startswith("live_write_") and f["severity"] == "error" for f in findings):
-        findings.append(_finding("live_write_ok", "info", filename, group, f"{mode_label} 模式的送訊息 → 驗證回應 → 刪除臨時對話全部驗證通過（convId={conv_id}）"))
+    _finalize_ok(findings, filename, group, f"{mode_label} 模式的送訊息 → 驗證回應 → 刪除臨時對話全部驗證通過（convId={conv_id}）")
 
     return findings
 
@@ -2220,18 +2130,10 @@ def run_admin_apikey_crud_test(entries, api_base_url, token, timeout=30):
     """
     findings = []
     filename, group = "admin-v1.yaml", "Admin V1"
-    entry = next((e for e in entries if e.get("filename") == filename and e.get("spec")), None)
-    if not entry:
-        findings.append(_finding("live_write_skipped", "info", filename, group, f"找不到 {filename} 的 spec，跳過寫入測試"))
+    spec, paths = _load_spec_for_test(entries, filename, group, findings)
+    if spec is None:
         return findings
-
-    spec = entry["spec"]
-    paths = spec.get("paths") or {}
-
-    def op_of(path, method):
-        op = paths[path][method]
-        op["__spec__"] = spec
-        return op
+    op_of = _make_op_of(spec, paths)
 
     user_id = _decode_jwt_user_id(token)
     if not user_id:
@@ -2243,8 +2145,7 @@ def run_admin_apikey_crud_test(entries, api_base_url, token, timeout=30):
     batch_delete_path = "/public/admin/v1/apikeys:batchDelete"
     apikeys_by_user_path = apikeys_by_user_path_template.replace("{userId}", user_id)
 
-    session = requests.Session()
-    session.headers.update({"X-Access-Token": token, "Content-Type": "application/json"})
+    session = _make_session(token)
     base = api_base_url.rstrip("/")
 
     # Step 0：確認測試帳號有沒有 user.admin 權限（用自己的 userId 查，不會踩到別人）
@@ -2345,10 +2246,7 @@ def run_admin_apikey_crud_test(entries, api_base_url, token, timeout=30):
         except requests.RequestException as exc:
             findings.append(_finding("live_write_error", "warning", filename, group, f"GET 驗證刪除結果失敗：{exc}", path=apikeys_by_user_path_template, method="GET"))
 
-    if not any(f["rule"].startswith("live_write_") and f["severity"] == "error" for f in findings):
-        findings.append(
-            _finding("live_write_ok", "info", filename, group, "Admin apikeys 的 POST → GET → 批次 DELETE → GET 全部驗證通過（只操作測試帳號自己的 userId），測試用的 key 已清除乾淨")
-        )
+    _finalize_ok(findings, filename, group, "Admin apikeys 的 POST → GET → 批次 DELETE → GET 全部驗證通過（只操作測試帳號自己的 userId），測試用的 key 已清除乾淨")
 
     return findings
 
@@ -2371,25 +2269,16 @@ def run_asura_transcription_test(entries, api_base_url, token, timeout=60):
         findings.append(_finding("live_write_skipped", "info", filename, group, "沒有設定 HELIX_TEST_AUDIO_PATH 或檔案不存在，跳過語音轉文字測試"))
         return findings
 
-    entry = next((e for e in entries if e.get("filename") == filename and e.get("spec")), None)
-    if not entry:
-        findings.append(_finding("live_write_skipped", "info", filename, group, f"找不到 {filename} 的 spec，跳過寫入測試"))
+    spec, paths = _load_spec_for_test(entries, filename, group, findings)
+    if spec is None:
         return findings
-
-    spec = entry["spec"]
-    paths = spec.get("paths") or {}
-
-    def op_of(path, method):
-        op = paths[path][method]
-        op["__spec__"] = spec
-        return op
+    op_of = _make_op_of(spec, paths)
 
     transcriptions_path = "/public/asura/v1/transcriptions"
     transcription_item_path_template = "/public/asura/v1/transcriptions/{transcriptionId}"
     presign_path = "/public/asura/v1/transcriptions:presign"
 
-    session = requests.Session()
-    session.headers.update({"X-Access-Token": token, "Content-Type": "application/json"})
+    session = _make_session(token)
     base = api_base_url.rstrip("/")
 
     test_filename = "[agent-test]-" + os.path.basename(HELIX_TEST_AUDIO_PATH)
@@ -2500,8 +2389,7 @@ def run_asura_transcription_test(entries, api_base_url, token, timeout=60):
         )
     )
 
-    if not any(f["rule"].startswith("live_write_") and f["severity"] == "error" for f in findings):
-        findings.append(_finding("live_write_ok", "info", filename, group, f"presign → 上傳 → 建立轉錄工作 → 輪詢結果全部驗證通過（transcriptionId={transcription_id}）"))
+    _finalize_ok(findings, filename, group, f"presign → 上傳 → 建立轉錄工作 → 輪詢結果全部驗證通過（transcriptionId={transcription_id}）")
 
     return findings
 
@@ -2515,22 +2403,13 @@ def run_asura_neartime_token_test(entries, api_base_url, token, timeout=30):
     """
     findings = []
     filename, group = "asura-v1.yaml", "Asura V1"
-    entry = next((e for e in entries if e.get("filename") == filename and e.get("spec")), None)
-    if not entry:
-        findings.append(_finding("live_write_skipped", "info", filename, group, f"找不到 {filename} 的 spec，跳過寫入測試"))
+    spec, paths = _load_spec_for_test(entries, filename, group, findings)
+    if spec is None:
         return findings
-
-    spec = entry["spec"]
-    paths = spec.get("paths") or {}
-
-    def op_of(path, method):
-        op = paths[path][method]
-        op["__spec__"] = spec
-        return op
+    op_of = _make_op_of(spec, paths)
 
     neartime_path = "/public/asura/v1/neartime/token"
-    session = requests.Session()
-    session.headers.update({"X-Access-Token": token, "Content-Type": "application/json"})
+    session = _make_session(token)
     base = api_base_url.rstrip("/")
 
     try:
@@ -2572,8 +2451,7 @@ def run_asura_neartime_token_test(entries, api_base_url, token, timeout=30):
         findings.append(_finding("live_write_aborted", "error", filename, group, f"解析回應失敗：{exc}", path=neartime_path, method="POST"))
         return findings
 
-    if not any(f["rule"].startswith("live_write_") and f["severity"] == "error" for f in findings):
-        findings.append(_finding("live_write_ok", "info", filename, group, "取得即時轉錄連線 token 成功，回應格式（token/path）驗證通過（未實際連線 WebSocket）"))
+    _finalize_ok(findings, filename, group, "取得即時轉錄連線 token 成功，回應格式（token/path）驗證通過（未實際連線 WebSocket）")
 
     return findings
 
@@ -2587,26 +2465,17 @@ def run_chat_normal_stream_test(entries, api_base_url, token, timeout=90):
     """
     findings = []
     filename, group = "chat-v2.yaml", "Chat V2"
-    entry = next((e for e in entries if e.get("filename") == filename and e.get("spec")), None)
-    if not entry:
-        findings.append(_finding("live_write_skipped", "info", filename, group, f"找不到 {filename} 的 spec，跳過寫入測試"))
+    spec, paths = _load_spec_for_test(entries, filename, group, findings)
+    if spec is None:
         return findings
-
-    spec = entry["spec"]
-    paths = spec.get("paths") or {}
-
-    def op_of(path, method):
-        op = paths[path][method]
-        op["__spec__"] = spec
-        return op
+    op_of = _make_op_of(spec, paths)
 
     conversations_path = "/public/chat/v2/conversations"
     conversation_item_path_template = "/public/chat/v2/conversations/{convId}"
     chat_stream_path = "/public/chat/v2/chat/normal:stream"
     models_path = "/public/chat/v2/models"
 
-    session = requests.Session()
-    session.headers.update({"X-Access-Token": token, "Content-Type": "application/json"})
+    session = _make_session(token)
     base = api_base_url.rstrip("/")
 
     try:
@@ -2710,8 +2579,7 @@ def run_chat_normal_stream_test(entries, api_base_url, token, timeout=90):
         except requests.RequestException as exc:
             findings.append(_finding("live_write_error", "warning", filename, group, f"GET 驗證刪除結果失敗：{exc}", path=conversation_item_path_template, method="GET"))
 
-    if not any(f["rule"].startswith("live_write_") and f["severity"] == "error" for f in findings):
-        findings.append(_finding("live_write_ok", "info", filename, group, f"串流送訊息 → 解析累積內容 → 刪除臨時對話全部驗證通過（convId={conv_id}）"))
+    _finalize_ok(findings, filename, group, f"串流送訊息 → 解析累積內容 → 刪除臨時對話全部驗證通過（convId={conv_id}）")
 
     return findings
 
@@ -2724,25 +2592,16 @@ def _run_chat_mode_stream_test(entries, api_base_url, token, timeout, *, mode, c
     """
     findings = []
     filename, group = "chat-v2.yaml", "Chat V2"
-    entry = next((e for e in entries if e.get("filename") == filename and e.get("spec")), None)
-    if not entry:
-        findings.append(_finding("live_write_skipped", "info", filename, group, f"找不到 {filename} 的 spec，跳過寫入測試"))
+    spec, paths = _load_spec_for_test(entries, filename, group, findings)
+    if spec is None:
         return findings
-
-    spec = entry["spec"]
-    paths = spec.get("paths") or {}
-
-    def op_of(path, method):
-        op = paths[path][method]
-        op["__spec__"] = spec
-        return op
+    op_of = _make_op_of(spec, paths)
 
     conversations_path = "/public/chat/v2/conversations"
     conversation_item_path_template = "/public/chat/v2/conversations/{convId}"
     models_path = "/public/chat/v2/models"
 
-    session = requests.Session()
-    session.headers.update({"X-Access-Token": token, "Content-Type": "application/json"})
+    session = _make_session(token)
     base = api_base_url.rstrip("/")
 
     try:
@@ -2875,8 +2734,7 @@ def _run_chat_mode_stream_test(entries, api_base_url, token, timeout, *, mode, c
     finally:
         cleanup_fn()
 
-    if not any(f["rule"].startswith("live_write_") and f["severity"] == "error" for f in findings):
-        findings.append(_finding("live_write_ok", "info", filename, group, f"{mode_label} 模式的串流送訊息 → 解析累積內容 → 刪除臨時對話全部驗證通過（convId={conv_id}）"))
+    _finalize_ok(findings, filename, group, f"{mode_label} 模式的串流送訊息 → 解析累積內容 → 刪除臨時對話全部驗證通過（convId={conv_id}）")
 
     return findings
 
@@ -2914,24 +2772,15 @@ def run_llm_visual_completions_test(entries, api_base_url, token, timeout=60):
     """
     findings = []
     filename, group = "llm-v1.yaml", "LLM V1"
-    entry = next((e for e in entries if e.get("filename") == filename and e.get("spec")), None)
-    if not entry:
-        findings.append(_finding("live_write_skipped", "info", filename, group, f"找不到 {filename} 的 spec，跳過寫入測試"))
+    spec, paths = _load_spec_for_test(entries, filename, group, findings)
+    if spec is None:
         return findings
-
-    spec = entry["spec"]
-    paths = spec.get("paths") or {}
-
-    def op_of(path, method):
-        op = paths[path][method]
-        op["__spec__"] = spec
-        return op
+    op_of = _make_op_of(spec, paths)
 
     visual_path = "/public/llm/v1/visual/v1/chat/completions"
     test_image_url = "https://httpbin.org/image/jpeg"
 
-    session = requests.Session()
-    session.headers.update({"X-Access-Token": token, "Content-Type": "application/json"})
+    session = _make_session(token)
     base = api_base_url.rstrip("/")
 
     try:
@@ -2983,8 +2832,7 @@ def run_llm_visual_completions_test(entries, api_base_url, token, timeout=60):
         findings.append(_finding("live_write_aborted", "error", filename, group, f"解析 visual completions 回應失敗：{exc}", path=visual_path, method="POST"))
         return findings
 
-    if not any(f["rule"].startswith("live_write_") and f["severity"] == "error" for f in findings):
-        findings.append(_finding("live_write_ok", "info", filename, group, "visual completions 呼叫成功，收到模型對測試圖片的描述回應"))
+    _finalize_ok(findings, filename, group, "visual completions 呼叫成功，收到模型對測試圖片的描述回應")
 
     return findings
 
@@ -3015,23 +2863,14 @@ def run_helix_enrollment_test(entries, api_base_url, token, timeout=60):
         findings.append(_finding("live_write_skipped", "info", filename, group, "沒有設定 HELIX_TEST_AUDIO_PATH 或檔案不存在，跳過 /enrollment 測試"))
         return findings
 
-    entry = next((e for e in entries if e.get("filename") == filename and e.get("spec")), None)
-    if not entry:
-        findings.append(_finding("live_write_skipped", "info", filename, group, f"找不到 {filename} 的 spec，跳過寫入測試"))
+    spec, paths = _load_spec_for_test(entries, filename, group, findings)
+    if spec is None:
         return findings
-
-    spec = entry["spec"]
-    paths = spec.get("paths") or {}
-
-    def op_of(path, method):
-        op = paths[path][method]
-        op["__spec__"] = spec
-        return op
+    op_of = _make_op_of(spec, paths)
 
     enrollment_path = "/public/helix/v1/enrollment"
 
-    session = requests.Session()
-    session.headers.update({"X-Access-Token": HELIX_ENROLLMENT_TEST_TOKEN, "Content-Type": "application/json"})
+    session = _make_session(HELIX_ENROLLMENT_TEST_TOKEN)
     base = api_base_url.rstrip("/")
 
     # Step 0：確認這個專用測試帳號真的還沒註冊過，不假設環境變數設定正確
@@ -3175,8 +3014,7 @@ def run_helix_enrollment_test(entries, api_base_url, token, timeout=60):
         )
     )
 
-    if not any(f["rule"].startswith("live_write_") and f["severity"] == "error" for f in findings):
-        findings.append(_finding("live_write_ok", "info", filename, group, f"專用測試帳號的 POST 註冊 → GET 驗證 → DELETE → GET 驗證清空全部驗證通過（voiceId={voice_id}）"))
+    _finalize_ok(findings, filename, group, f"專用測試帳號的 POST 註冊 → GET 驗證 → DELETE → GET 驗證清空全部驗證通過（voiceId={voice_id}）")
 
     return findings
 
@@ -3206,24 +3044,15 @@ def run_asura_speech_zero_shot_test(entries, api_base_url, token, timeout=60):
         findings.append(_finding("live_write_skipped", "info", filename, group, "沒有設定 HELIX_TEST_AUDIO_PATH 或檔案不存在，跳過零樣本語音克隆測試"))
         return findings
 
-    entry = next((e for e in entries if e.get("filename") == filename and e.get("spec")), None)
-    if not entry:
-        findings.append(_finding("live_write_skipped", "info", filename, group, f"找不到 {filename} 的 spec，跳過寫入測試"))
+    spec, paths = _load_spec_for_test(entries, filename, group, findings)
+    if spec is None:
         return findings
-
-    spec = entry["spec"]
-    paths = spec.get("paths") or {}
-
-    def op_of(path, method):
-        op = paths[path][method]
-        op["__spec__"] = spec
-        return op
+    op_of = _make_op_of(spec, paths)
 
     zero_shot_path = "/public/asura/v1/speeches:zero-shot"
     presign_path = "/public/asura/v1/transcriptions:presign"
 
-    session = requests.Session()
-    session.headers.update({"X-Access-Token": token, "Content-Type": "application/json"})
+    session = _make_session(token)
     base = api_base_url.rstrip("/")
 
     # Step 0：故意不帶 promptVoiceUrl/promptVoiceAssetKey，實測 spec 沒把它們標必填是否屬實
@@ -3344,8 +3173,7 @@ def run_asura_speech_zero_shot_test(entries, api_base_url, token, timeout=60):
     elif len(resp.content) == 0:
         findings.append(_finding("live_write_data_mismatch", "error", filename, group, "回應的音訊內容是空的", path=zero_shot_path, method="POST"))
 
-    if not any(f["rule"].startswith("live_write_") and f["severity"] == "error" for f in findings):
-        findings.append(_finding("live_write_ok", "info", filename, group, f"零樣本語音克隆呼叫成功，收到 {len(resp.content)} bytes 的 {content_type_resp} 音訊"))
+    _finalize_ok(findings, filename, group, f"零樣本語音克隆呼叫成功，收到 {len(resp.content)} bytes 的 {content_type_resp} 音訊")
 
     return findings
 
@@ -3376,25 +3204,16 @@ def run_helix_voice_search_by_audio_test(entries, api_base_url, token, timeout=1
         findings.append(_finding("live_write_skipped", "info", filename, group, "沒有設定 HELIX_TEST_AUDIO_PATH 或檔案不存在，跳過 voices:searchByAudio 測試"))
         return findings
 
-    entry = next((e for e in entries if e.get("filename") == filename and e.get("spec")), None)
-    if not entry:
-        findings.append(_finding("live_write_skipped", "info", filename, group, f"找不到 {filename} 的 spec，跳過寫入測試"))
+    spec, paths = _load_spec_for_test(entries, filename, group, findings)
+    if spec is None:
         return findings
-
-    spec = entry["spec"]
-    paths = spec.get("paths") or {}
-
-    def op_of(path, method):
-        op = paths[path][method]
-        op["__spec__"] = spec
-        return op
+    op_of = _make_op_of(spec, paths)
 
     voices_path = "/public/helix/v1/voices"
     voice_item_path_template = "/public/helix/v1/voices/{voiceId}"
     search_path = "/public/helix/v1/voices:searchByAudio"
 
-    session = requests.Session()
-    session.headers.update({"X-Access-Token": token, "Content-Type": "application/json"})
+    session = _make_session(token)
     base = api_base_url.rstrip("/")
 
     test_filename = "[agent-test]-searchByAudio-" + os.path.basename(HELIX_TEST_AUDIO_PATH)
@@ -3494,8 +3313,7 @@ def run_helix_voice_search_by_audio_test(entries, api_base_url, token, timeout=1
 
     cleanup()
 
-    if not any(f["rule"].startswith("live_write_") and f["severity"] == "error" for f in findings):
-        findings.append(_finding("live_write_ok", "info", filename, group, f"searchByAudio 呼叫成功、回應格式驗證通過，臨時聲紋（{voice_id}）已清除乾淨"))
+    _finalize_ok(findings, filename, group, f"searchByAudio 呼叫成功、回應格式驗證通過，臨時聲紋（{voice_id}）已清除乾淨")
 
     return findings
 
@@ -3512,24 +3330,15 @@ def run_llm_chat_completions_test(entries, api_base_url, token, timeout=60):
     """
     findings = []
     filename, group = "llm-v1.yaml", "LLM V1"
-    entry = next((e for e in entries if e.get("filename") == filename and e.get("spec")), None)
-    if not entry:
-        findings.append(_finding("live_write_skipped", "info", filename, group, f"找不到 {filename} 的 spec，跳過寫入測試"))
+    spec, paths = _load_spec_for_test(entries, filename, group, findings)
+    if spec is None:
         return findings
-
-    spec = entry["spec"]
-    paths = spec.get("paths") or {}
-
-    def op_of(path, method):
-        op = paths[path][method]
-        op["__spec__"] = spec
-        return op
+    op_of = _make_op_of(spec, paths)
 
     models_path = "/public/llm/v1/fedgpt/v1/models"
     completions_path = "/public/llm/v1/fedgpt/v1/chat/completions"
 
-    session = requests.Session()
-    session.headers.update({"X-Access-Token": token, "Content-Type": "application/json"})
+    session = _make_session(token)
     base = api_base_url.rstrip("/")
 
     try:
@@ -3603,8 +3412,7 @@ def run_llm_chat_completions_test(entries, api_base_url, token, timeout=60):
         findings.append(_finding("live_write_aborted", "error", filename, group, f"解析 chat completions 回應失敗：{exc}", path=completions_path, method="POST"))
         return findings
 
-    if not any(f["rule"].startswith("live_write_") and f["severity"] == "error" for f in findings):
-        findings.append(_finding("live_write_ok", "info", filename, group, f"chat completions 呼叫成功（model={body['model']}）"))
+    _finalize_ok(findings, filename, group, f"chat completions 呼叫成功（model={body['model']}）")
 
     return findings
 
@@ -3629,18 +3437,10 @@ def run_auth_login_logout_test(entries, api_base_url, token, timeout=30):
         findings.append(_finding("live_write_skipped", "info", filename, group, "沒有設定 AUTH_LOGIN_TEST_USERNAME/AUTH_LOGIN_TEST_PASSWORD，跳過 login/logout 測試"))
         return findings
 
-    entry = next((e for e in entries if e.get("filename") == filename and e.get("spec")), None)
-    if not entry:
-        findings.append(_finding("live_write_skipped", "info", filename, group, f"找不到 {filename} 的 spec，跳過寫入測試"))
+    spec, paths = _load_spec_for_test(entries, filename, group, findings)
+    if spec is None:
         return findings
-
-    spec = entry["spec"]
-    paths = spec.get("paths") or {}
-
-    def op_of(path, method):
-        op = paths[path][method]
-        op["__spec__"] = spec
-        return op
+    op_of = _make_op_of(spec, paths)
 
     login_path = "/public/auth/v2/fedgpt/login"
     logout_path = "/public/auth/v2/logout"
@@ -3668,8 +3468,7 @@ def run_auth_login_logout_test(entries, api_base_url, token, timeout=30):
         findings.append(_finding("live_write_aborted", "error", filename, group, f"登入回應裡拿不到有效的 token：{exc}", path=login_path, method="POST"))
         return findings
 
-    logout_session = requests.Session()
-    logout_session.headers.update({"X-Access-Token": new_token, "Content-Type": "application/json"})
+    logout_session = _make_session(new_token)
 
     try:
         resp = logout_session.post(f"{base}{logout_path}", timeout=timeout)
@@ -3722,8 +3521,7 @@ def run_auth_login_logout_test(entries, api_base_url, token, timeout=30):
                 )
             )
 
-    if not any(f["rule"].startswith("live_write_") and f["severity"] == "error" for f in findings):
-        findings.append(_finding("live_write_ok", "info", filename, group, "登入 → 登出 → 驗證 token 真的失效全部驗證通過（次要測試帳號，未動到主要測試帳號的 token）"))
+    _finalize_ok(findings, filename, group, "登入 → 登出 → 驗證 token 真的失效全部驗證通過（次要測試帳號，未動到主要測試帳號的 token）")
 
     return findings
 
@@ -3748,18 +3546,10 @@ def run_auth_ldap_login_test(entries, api_base_url, token, timeout=30):
         findings.append(_finding("live_write_skipped", "info", filename, group, "沒有設定 AUTH_LOGIN_TEST_USERNAME/AUTH_LOGIN_TEST_PASSWORD，跳過 ldap/login 測試"))
         return findings
 
-    entry = next((e for e in entries if e.get("filename") == filename and e.get("spec")), None)
-    if not entry:
-        findings.append(_finding("live_write_skipped", "info", filename, group, f"找不到 {filename} 的 spec，跳過寫入測試"))
+    spec, paths = _load_spec_for_test(entries, filename, group, findings)
+    if spec is None:
         return findings
-
-    spec = entry["spec"]
-    paths = spec.get("paths") or {}
-
-    def op_of(path, method):
-        op = paths[path][method]
-        op["__spec__"] = spec
-        return op
+    op_of = _make_op_of(spec, paths)
 
     providers_path = "/public/auth/v2/providers"
     login_path = "/public/auth/v2/ldap/login"
@@ -3820,8 +3610,7 @@ def run_auth_ldap_login_test(entries, api_base_url, token, timeout=30):
         findings.append(_finding("live_write_aborted", "error", filename, group, f"LDAP 登入回應裡拿不到有效的 token：{exc}", path=login_path, method="POST"))
         return findings
 
-    logout_session = requests.Session()
-    logout_session.headers.update({"X-Access-Token": new_token, "Content-Type": "application/json"})
+    logout_session = _make_session(new_token)
     try:
         logout_resp = logout_session.post(f"{base}{logout_path}", timeout=timeout)
         if logout_resp.status_code != 200 or not logout_resp.json().get("success"):
@@ -3831,7 +3620,6 @@ def run_auth_ldap_login_test(entries, api_base_url, token, timeout=30):
     except requests.RequestException as exc:
         findings.append(_finding("live_write_cleanup_failed", "error", filename, group, f"登出剛才 LDAP 登入拿到的 token 失敗：{exc}，需要留意這個 token 還有效", path=logout_path, method="POST"))
 
-    if not any(f["rule"].startswith("live_write_") and f["severity"] == "error" for f in findings):
-        findings.append(_finding("live_write_ok", "info", filename, group, "LDAP 登入成功並已登出清除，測試通過"))
+    _finalize_ok(findings, filename, group, "LDAP 登入成功並已登出清除，測試通過")
 
     return findings

@@ -34,6 +34,20 @@ KNOWN_NON_PUBLIC_EXCEPTIONS = {
 GOOGLE_CHAT_WEBHOOK_URL = os.environ.get("GOOGLE_CHAT_WEBHOOK_URL", "")
 TEAMS_WEBHOOK_URL = os.environ.get("TEAMS_WEBHOOK_URL", "")
 
+# 推播訊息裡「開啟完整報告」要連去哪裡。設了這個就用這個固定網址，不設就退回本機報告檔案的
+# 絕對路徑（只有拿得到那台機器的人看得到）。建議指到 CONFLUENCE_REPORT_PAGE_ID 那頁的網址，
+# 這樣每次 --notify-confluence 更新完頁面內容，連結自然對得上，不需要另外維護。
+REPORT_LINK_URL = os.environ.get("REPORT_LINK_URL", "")
+
+# --- Confluence 報告同步（--notify-confluence）---
+# 跟 Artifact 不同，Confluence 有公開的 REST API，用個人的 email + API token 打 Basic Auth
+# 就能更新，不綁定任何人的 Claude 帳號——只要那個人在目標 space 有編輯權限即可。
+# API token 自己在 https://id.atlassian.com/manage-profile/security/api-tokens 申請。
+CONFLUENCE_SITE_URL = os.environ.get("CONFLUENCE_SITE_URL", "https://ailabstw.atlassian.net")
+CONFLUENCE_EMAIL = os.environ.get("CONFLUENCE_EMAIL", "")
+CONFLUENCE_API_TOKEN = os.environ.get("CONFLUENCE_API_TOKEN", "")
+CONFLUENCE_REPORT_PAGE_ID = os.environ.get("CONFLUENCE_REPORT_PAGE_ID", "")
+
 REQUEST_TIMEOUT_SECONDS = 20
 
 # --- Live call（第二階段，目前只做 GET）---

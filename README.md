@@ -27,6 +27,10 @@ Mac／Linux 上如果系統的 `python`/`pip` 沒有指到 Python 3，改用 `py
 | `AUTH_LOGIN_TEST_USERNAME` / `AUTH_LOGIN_TEST_PASSWORD` | `--live-write` 測 Auth V2 的 `fedgpt/login`、`ldap/login`、`logout` 要用的次要帳號帳密 | 選填，固定用一個次要帳號（不是主要測試帳號），因為登入會產生新 token、登出會讓某個 token 失效，不想動到主要測試帳號正在用的 token。沒有設定就跳過這幾組測試 |
 | `GOOGLE_CHAT_WEBHOOK_URL` | `--notify` 推播用 | 目標 Google Chat Space → Apps & integrations → Webhooks |
 | `TEAMS_WEBHOOK_URL` | `--notify-teams` 推播用 | Teams 頻道/對話 → Workflows → 建一個 "When a Teams webhook request is received" 的 flow |
+| `REPORT_LINK_URL` | `--notify`/`--notify-teams` 推播卡片裡「開啟完整報告」連到的網址 | 選填，建議設成下面 `CONFLUENCE_REPORT_PAGE_ID` 那頁的網址（用 `--notify-confluence` 更新內容，網址不變）。沒設的話會退回本機報告檔案的絕對路徑（只有拿得到那台機器的人看得到） |
+| `CONFLUENCE_SITE_URL` | `--notify-confluence` 要打的 Confluence 站台 | 選填，預設 `https://ailabstw.atlassian.net` |
+| `CONFLUENCE_REPORT_PAGE_ID` | `--notify-confluence` 要更新的固定頁面 ID | 選填，目前指到 [FEDGPT-15990] 底下的「API Review Agent — 最新報告」子頁（`469303303`），每次執行整頁覆寫 |
+| `CONFLUENCE_EMAIL` / `CONFLUENCE_API_TOKEN` | `--notify-confluence` 認證用 | 選填，**每個人要用自己的**：email 是你的 Atlassian 帳號，API token 在 <https://id.atlassian.com/manage-profile/security/api-tokens> 自己申請一組。只要在目標 space 有編輯權限就能更新，不綁定特定人或特定 Claude 帳號 |
 
 ### Token 過期怎麼辦
 
@@ -50,6 +54,7 @@ python run_check.py --live-write        # 加上 POST/PUT/DELETE 測試（見下
 python run_check.py --llm-check         # 加上 LLM 文字審查（會呼叫真的 LLM API，較慢）
 python run_check.py --notify            # 跑完推播摘要到 Google Chat
 python run_check.py --notify-teams      # 跑完推播摘要到 Microsoft Teams
+python run_check.py --notify-confluence # 跑完把完整結果更新到固定的 Confluence 頁面（不綁定特定人的帳號）
 python run_check.py --no-diff           # 不跟快照比對（預設會比對並更新快照）
 python run_check.py --diff-against v3.10  # 強制跟指定版本的快照比對，而不是自動選最接近的版本
 python run_check.py --base-url https://fedgpt-stg2-vm1.corp.ailabs.tw/swagger/docs --token <stg2 token>
@@ -112,7 +117,17 @@ python run_check.py --live-write --llm-check --notify-teams
 `--live`/`--live-write`/`--llm-check` 開始跑之前，會先打一支輕量端點確認 `--token` 有沒有過期或被撤銷（`check_token_valid`，見 [live_call.py](agent/live_call.py)）；驗證失敗會直接印出清楚的錯誤訊息並中止，不會往下跑一堆誤導性的結果。這是因為 token 失效時，如果沒有這個檢查，後面每支端點都會各自回報一個「回傳 401 但 spec 沒宣告」的 `undocumented_status_code`，報告會出現一整排看起來像是各自獨立的 spec 問題，其實共同原因只有一個。
 
 ### 報告在哪裡看
-每次執行都會在 `reports/`（已加進 `.gitignore`）產生一份帶時間戳的 HTML 檔案，直接用瀏覽器開就能看。這個資料夾只在本機，不會自動分享出去——目前要讓其他人也能看到報告，是透過 Claude Code session 手動發布成一個連結（用 Artifact 工具），不是這個 repo 自帶的功能。
+每次執行都會在 `reports/`（已加進 `.gitignore`）產生一份帶時間戳的 HTML 檔案，直接用瀏覽器開就能看。這個資料夾只在本機，不會自動分享出去。
+
+**線上共用連結：Confluence（推薦）**——加上 `--notify-confluence` 就會把這次完整結果更新到 `CONFLUENCE_REPORT_PAGE_ID` 那頁固定的 Confluence 頁面（[API Review Agent — 最新報告](https://ailabstw.atlassian.net/wiki/spaces/FEDGPT/pages/469303303/API+Review+Agent)），網址永遠不變。這是直接打 **Confluence 公開的 REST API**（`agent/confluence_report.py`），不透過 Claude，也**不綁定任何人的帳號**——每個人在 `.env` 填自己的 `CONFLUENCE_EMAIL`/`CONFLUENCE_API_TOKEN`，只要在目標 space 有編輯權限就能更新到同一頁，這點跟下面的 Claude Artifact 不一樣。呈現上是純表格（沒有摺疊分類、深色模式），不是完整搬運 `reports/` 那份互動式 HTML。
+
+```bash
+python run_check.py --live-write --notify-confluence --notify-teams
+```
+
+**線上共用連結：Claude Artifact（舊做法，會綁定發布者的 Claude 帳號）**——透過 Claude Code session 手動發布成一個連結（用 Artifact 工具）。**這個連結只有發布它的那個 Claude 帳號能更新**，如果之後會有不同人輪流跑這個工具、更新同一份報告，不建議用這個，改用上面的 Confluence 方式。
+
+**推播卡片裡的報告連結**：設定 `REPORT_LINK_URL` 後，`--notify`/`--notify-teams` 的卡片會改成連到那個網址（建議設成 Confluence 頁面的網址），不會再顯示只有本機看得到的檔案路徑。⚠️ 不管連到 Confluence 還是 Artifact，`REPORT_LINK_URL` 本身都**不會自動觸發同步**——要嘛跑的時候有加對應的 `--notify-confluence`（會自動同步），要嘛是走 Artifact 那條路、每次都要手動 publish 一次，兩者不能只設網址就期待內容自動跟上。
 
 ---
 

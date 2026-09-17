@@ -22,12 +22,18 @@ from datetime import datetime
 from agent.checks import run_all_checks
 from agent.chat_notify import build_chat_message, post_to_google_chat
 from agent.config import (
+    CONFLUENCE_API_TOKEN,
+    CONFLUENCE_EMAIL,
+    CONFLUENCE_REPORT_PAGE_ID,
+    CONFLUENCE_SITE_URL,
     DEFAULT_BASE_URL,
     FEDGPT_ACCESS_TOKEN,
     GOOGLE_CHAT_WEBHOOK_URL,
+    REPORT_LINK_URL,
     TEAMS_WEBHOOK_URL,
     derive_api_base_url,
 )
+from agent.confluence_report import update_confluence_report
 from agent.fetch import fetch_specs, load_local_specs
 from agent.live_call import check_token_valid, run_live_get_checks
 from agent.live_write_test import (
@@ -77,6 +83,12 @@ def main():
     parser.add_argument("--webhook-url", default=GOOGLE_CHAT_WEBHOOK_URL, help="覆寫 GOOGLE_CHAT_WEBHOOK_URL")
     parser.add_argument("--notify-teams", action="store_true", help="把摘要推到 Microsoft Teams")
     parser.add_argument("--teams-webhook-url", default=TEAMS_WEBHOOK_URL, help="覆寫 TEAMS_WEBHOOK_URL")
+    parser.add_argument(
+        "--notify-confluence",
+        action="store_true",
+        help="把完整結果更新到 CONFLUENCE_REPORT_PAGE_ID 那頁 Confluence 頁面（需要 CONFLUENCE_EMAIL/CONFLUENCE_API_TOKEN/CONFLUENCE_REPORT_PAGE_ID）——"
+        "直接打 Confluence REST API，不透過 Claude，也不綁定特定人的帳號，只要那個人在目標 space 有編輯權限就能更新",
+    )
     parser.add_argument("--live", action="store_true", help="額外對 GET endpoint 做 live call（只讀，不含 POST/PUT/DELETE）")
     parser.add_argument("--api-base-url", default=None, help="覆寫 live call 要打的 API origin（預設從 --base-url 推導）")
     parser.add_argument("--token", default=FEDGPT_ACCESS_TOKEN, help="覆寫 FEDGPT_ACCESS_TOKEN（live call 用）")
@@ -195,10 +207,14 @@ def main():
         fh.write(render_html(findings, entries, source_label))
     print(f"HTML report 已寫入：{os.path.abspath(report_path)}")
 
+    # 推播訊息裡的報告連結：設了 REPORT_LINK_URL 就指到那個固定網址（建議指到
+    # CONFLUENCE_REPORT_PAGE_ID 那頁），沒設就退回本機檔案路徑，見 config.py 的說明。
+    notify_report_ref = REPORT_LINK_URL or os.path.abspath(report_path)
+
     ok = True
 
     if args.notify:
-        message = build_chat_message(findings, entries, source_label, report_path=os.path.abspath(report_path))
+        message = build_chat_message(findings, entries, source_label, report_path=notify_report_ref)
         try:
             post_to_google_chat(args.webhook_url, message)
             print("已推播摘要到 Google Chat")
@@ -206,8 +222,16 @@ def main():
             print(f"推播到 Google Chat 失敗：{exc}", file=sys.stderr)
             ok = False
 
+    if args.notify_confluence:
+        try:
+            update_confluence_report(CONFLUENCE_SITE_URL, CONFLUENCE_EMAIL, CONFLUENCE_API_TOKEN, CONFLUENCE_REPORT_PAGE_ID, findings, entries, source_label)
+            print("已更新 Confluence 報告頁面")
+        except Exception as exc:  # noqa: BLE001
+            print(f"更新 Confluence 報告頁面失敗：{exc}", file=sys.stderr)
+            ok = False
+
     if args.notify_teams:
-        payload = build_teams_payload(findings, entries, source_label, report_path=os.path.abspath(report_path))
+        payload = build_teams_payload(findings, entries, source_label, report_path=notify_report_ref)
         try:
             post_to_teams(args.teams_webhook_url, payload)
             print("已推播摘要到 Microsoft Teams")
