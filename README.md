@@ -318,7 +318,7 @@ Agent 能檢查出「這裡沒寫 description」，但**不負責猜測正確的
 - LLM V1 的 embeddings（`run_llm_embeddings_test`）、visual completions（`run_llm_visual_completions_test`，圖片網址用固定的公開測試圖，部署環境若限制對外連線可能因此失敗——那是環境限制不是 API 問題）與直接的 chat completions（`run_llm_chat_completions_test`，先 `GET /models` 拿代稱，回 404 時照文件建議改用帶版號的模型 ID 重試一次）
 - Asura V1 的文字轉語音（`run_asura_tts_test`）、零樣本語音克隆（`run_asura_speech_zero_shot_test`，目前這個環境上這支端點有 bug，見下方）、語音轉文字（`run_asura_transcription_test`，沒有 DELETE，工作紀錄永久留存）、即時轉錄連線 token（`run_asura_neartime_token_test`，只驗證取得憑證的契約，不實際連 WebSocket）
 
-**測試過程中意外發現的 spec 正確性問題**（都已記錄成報告裡的 `spec_description_mismatch` 或 `undocumented_status_code` finding）：
+**測試過程中意外發現的 spec 正確性問題**（都已記錄成報告裡的 `spec_description_mismatch`、`response_schema_mismatch` 或 `undocumented_status_code` finding）：
 - `DELETE /knowledge/v3/knowledges/{knowledgeId}` 文件寫「底下的文件會一起消失」，實測要先清空文件才能刪除（回 423，且未宣告這個狀態碼）
 - `POST /helix/v1/voices` 的 `audioUris` 文件建議走 Asset V2 上傳取網址，但 Asset V2 給的是 `assetKey` 不是網址，直接送出去實際回 502（未宣告）
 - `FedFlow` 執行結果的 `state` 出現未宣告的 `PENDING`
@@ -330,6 +330,11 @@ Agent 能檢查出「這裡沒寫 description」，但**不負責猜測正確的
 - `POST /asura/v1/speeches:zero-shot` 的 `ZeroShotSpeechInput.input` 只把 `text` 標必填，`promptVoiceUrl`/`promptVoiceAssetKey` 都是選填，但兩個都不帶實際回 400，代表伺服器端其實兩者擇一是必填
 - `POST /asura/v1/speeches:zero-shot` 照 spec 建議的做法（走 `transcriptions:presign` 上傳、把 `assetKey` 填進 `promptVoiceAssetKey`）一律回 500（`http-gateway`／`data.unhandled`／`unexpected status code: 400`，代表上游回了 400 但這層沒處理、直接包成看不出原因的 500）。手動排查過排除是 assetKey 或模型名稱的問題：同一個 assetKey 打 `/transcriptions` 完全正常，換成已驗證能連得到的真實網址填 `promptVoiceUrl` 一樣回同一個 500——這支端點處理語音範本輸入的路徑本身壞了，比較像後端 bug 而非文件問題
 - `POST /auth/v2/logout` 的敘述文字寫「註銷後再用同一個 token 會拿到 401 auth.invalid-auth」，實測行為跟敘述一致，但正式的 `responses` 只宣告了 `200`，401 沒有列進去——文件的敘述段落跟正式的狀態碼清單對不上
+- `GET /chat/v2/conversations`／`GET /chat/v2/conversations/{convId}` 的 `Conversation` schema把 `disabled` 標成必填，但 stg2 實際回應完全沒有這個欄位
+- `GET /chat/v2/faqs` 的 `Faq` schema 把 `description` 標成必填，但 stg2 實際回應完全沒有這個欄位
+- 送訊息四個 mode（`agenticRag`／`faq`／`knowledge`／`normal`）回應裡的 `guardian` 物件，schema 把 `biasScore`／`hallucinationScore` 都標成必填，但 stg2 實際回應都沒有這兩個欄位
+- 同上四個 mode 回應裡的 `humanInLoop` 欄位，schema 宣告型別是 `object`，但 stg2 實際回應是 `null`
+- 以上四點目前看起來比較像是 spec 標必填標過頭（這幾個欄位可能設計上就是選填/條件性才會出現，例如 `guardian` 分數可能只有開啟防護功能才有），還是後端功能還沒做完，需要熟悉 Chat V2 guardian／humanInLoop 實作的人確認實際設計意圖，Agent 這邊只能標出「宣告與實際不符」，無法判斷哪邊才是對的
 
 **工具本身的 bug（非 spec 問題，記錄下來避免以後重踩）**：`_parse_sse_dialect_a` 一開始用 `resp.iter_lines(decode_unicode=True)` 解析 SSE 串流，`requests` 這個參數會在網路封包還沒重組成完整一行前就先解碼，中文字的 UTF-8 多位元組序列被切在封包邊界時會解碼壞掉、把一則 `data:` 誤判成兩行，導致 `chat/faq:stream`、`chat/tabular:stream` 這兩個「回應剛好含中文」的測試一直收不到任何 `event: data`。修正是改讀原始 bytes 再自己用 `\n` 分行（UTF-8 裡 `\n` 永遠是安全的分割點）、每行湊齊後才解碼。
 

@@ -14,6 +14,8 @@
     }
 """
 
+import re
+
 from openapi_spec_validator import OpenAPIV31SpecValidator
 
 from .config import HTTP_METHODS, KNOWN_NON_PUBLIC_EXCEPTIONS
@@ -315,11 +317,100 @@ def check_schemas(entry):
     return findings
 
 
+_SSE_TABLE_ROW_RE = re.compile(
+    r"\|\s*`(GET|POST|PUT|PATCH|DELETE)\s+([^\s`]+)`\s*\|\s*([^|]+?)\s*\|"
+)
+
+
+def check_sse_content_type_declared(entries):
+    """R7: 對照 sse.yaml 說明文件裡「哪一支用哪一種」表格列出的串流端點，確認每支端點自己
+    的 spec 真的有宣告 `text/event-stream` response content type。
+
+    這份表格是人工維護的（見 sse.yaml 的 info.description），這裡直接從表格文字解析清單，
+    不在程式碼裡另外重複維護一份端點清單——避免兩邊各自維護、日後表格更新了但程式碼忘記
+    跟著改，讓規則悄悄失效卻沒人發現。Swagger 本身才是 ground truth：表格說會串流，spec
+    自己卻沒宣告，就是文件之間互相矛盾，需要有人確認並修正。
+    """
+    findings = []
+    sse_entry = next((e for e in entries if e.get("filename") == "sse.yaml" and e.get("spec")), None)
+    if not sse_entry:
+        return findings
+
+    description = ((sse_entry["spec"].get("info") or {}).get("description")) or ""
+    rows = [
+        (m.group(1).lower(), m.group(2), m.group(3).strip())
+        for m in _SSE_TABLE_ROW_RE.finditer(description)
+    ]
+    if not rows:
+        findings.append(
+            _finding(
+                "sse_doc_table_unparseable",
+                "warning",
+                sse_entry["filename"],
+                sse_entry["group"],
+                "解析不出 info.description 裡「哪一支用哪一種」的端點表格，"
+                "這條規則這次沒有實際比對到任何端點——可能是表格格式被改了，需要有人確認並更新解析邏輯",
+            )
+        )
+        return findings
+
+    entries_by_group = {}
+    for e in entries:
+        entries_by_group.setdefault(e.get("group"), []).append(e)
+
+    for method, path, group in rows:
+        op, owner = None, None
+        for candidate in entries_by_group.get(group, []):
+            spec = candidate.get("spec")
+            item = (spec.get("paths") or {}).get(path) if spec else None
+            if isinstance(item, dict) and method in item:
+                op, owner = item[method], candidate
+                break
+
+        if op is None:
+            findings.append(
+                _finding(
+                    "sse_doc_endpoint_not_found",
+                    "warning",
+                    sse_entry["filename"],
+                    sse_entry["group"],
+                    f"SSE 說明文件把 `{method.upper()} {path}`（分頁：{group}）列為串流端點，"
+                    "但在該分頁的 spec 裡找不到這支端點，可能已改名、搬家，或分頁本身沒有被抓取，文件需要更新",
+                    path=path,
+                    method=method,
+                )
+            )
+            continue
+
+        content_types = set()
+        for resp in (op.get("responses") or {}).values():
+            if isinstance(resp, dict):
+                content_types.update((resp.get("content") or {}).keys())
+        if "text/event-stream" not in content_types:
+            findings.append(
+                _finding(
+                    "sse_content_type_not_declared",
+                    "error",
+                    owner["filename"],
+                    owner["group"],
+                    "SSE 說明文件（sse.yaml）把這支端點列為會用 `text/event-stream` 串流回應，"
+                    "但這支端點自己的 spec 沒有宣告這個 content type",
+                    path=path,
+                    method=method,
+                )
+            )
+    return findings
+
+
 ALL_CHECKS = [
     check_schema_validity,
     check_operation_docs,
     check_public_prefix,
     check_schemas,
+]
+
+CROSS_ENTRY_CHECKS = [
+    check_sse_content_type_declared,
 ]
 
 
@@ -340,4 +431,6 @@ def run_all_checks(entries):
             continue
         for check_fn in ALL_CHECKS:
             all_findings.extend(check_fn(entry))
+    for check_fn in CROSS_ENTRY_CHECKS:
+        all_findings.extend(check_fn(entries))
     return all_findings
