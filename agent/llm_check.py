@@ -34,10 +34,14 @@ _SYSTEM_PROMPT = (
     "(2) does it logically contradict another description in this same list (or itself). "
     "Do NOT flag: missing descriptions (not your job), style, formatting, tone, or descriptions "
     "that are merely terse but unambiguous. Only flag real problems a careful reader would hit. "
+    "Also give one overall 1-5 clarity_score for THIS endpoint's descriptions as a whole (5 = "
+    "fully clear, no issues; 3 = usable but has some ambiguity; 1 = confusing/contradictory enough "
+    "to block integration). The score is a supplementary summary signal, not a substitute for the "
+    "issues list — still list every concrete problem in issues even when you also give a high score. "
     "Respond with exactly one JSON object, nothing else: "
-    '{"issues": [{"location": "<the label>", "severity": "error"|"warning", "message": "<why, in Traditional Chinese>"}]}. '
+    '{"clarity_score": 1-5, "issues": [{"location": "<the label>", "severity": "error"|"warning", "message": "<why, in Traditional Chinese>"}]}. '
     'Use "error" only for direct logical contradictions. Use "warning" for genuine ambiguity. '
-    'If there is nothing to flag, respond {"issues": []}.'
+    'If there is nothing to flag, respond {"clarity_score": <score>, "issues": []}.'
 )
 
 
@@ -131,7 +135,9 @@ def _call_llm(api_base_url, token, prompt_items, timeout):
     issues = parsed.get("issues")
     if not isinstance(issues, list):
         raise ValueError(f"預期 'issues' 是 list，實際拿到：{parsed!r}")
-    return issues
+    score = parsed.get("clarity_score")
+    score = score if isinstance(score, int) and 1 <= score <= 5 else None
+    return score, issues
 
 
 def run_llm_checks(entries, api_base_url, token, timeout=REQUEST_TIMEOUT_SECONDS * 3):
@@ -154,7 +160,7 @@ def run_llm_checks(entries, api_base_url, token, timeout=REQUEST_TIMEOUT_SECONDS
                 if not prompt_items:
                     continue
                 try:
-                    issues = _call_llm(api_base_url, token, prompt_items, timeout)
+                    score, issues = _call_llm(api_base_url, token, prompt_items, timeout)
                 except Exception as exc:  # noqa: BLE001 - LLM 呼叫/解析失敗要回報，不能讓一支 endpoint 中斷整輪
                     findings.append(
                         _finding(
@@ -168,6 +174,18 @@ def run_llm_checks(entries, api_base_url, token, timeout=REQUEST_TIMEOUT_SECONDS
                         )
                     )
                     continue
+                if score is not None:
+                    findings.append(
+                        _finding(
+                            "llm_clarity_score",
+                            "info",
+                            entry["filename"],
+                            entry["group"],
+                            f"文字清晰度評分：{score}/5（輔助參考，仍以下方具體 issues 為準）",
+                            path=path,
+                            method=method,
+                        )
+                    )
                 for issue in issues:
                     if not isinstance(issue, dict):
                         continue

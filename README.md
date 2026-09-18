@@ -51,7 +51,7 @@ python run_check.py                    # 只做靜態比對 + 跟上次執行的
 python run_check.py --local swagger-spec   # 離線模式，吃本機存的 YAML 快照，不連網
 python run_check.py --live              # 加上對 GET 端點的 live call（唯讀，需要 token）
 python run_check.py --live-write        # 加上 POST/PUT/DELETE 測試（見下方警語）
-python run_check.py --llm-check         # 加上 LLM 文字審查（會呼叫真的 LLM API，較慢）
+python run_check.py --llm-check         # 加上 LLM 文字審查（會呼叫真的 LLM API，較慢；評分標準見下方說明）
 python run_check.py --notify            # 跑完推播摘要到 Google Chat
 python run_check.py --notify-teams      # 跑完推播摘要到 Microsoft Teams
 python run_check.py --notify-confluence # 跑完把完整結果更新到固定的 Confluence 頁面（不綁定特定人的帳號）
@@ -62,15 +62,16 @@ python run_check.py --base-url https://fedgpt-stg2-vm1.corp.ailabs.tw/swagger/do
 以上旗標可以自由組合。想固定測 stg2 的話，直接用包好的腳本——Windows 用 [test_stg2.ps1](test_stg2.ps1)，Mac／Linux 用 [test_stg2.sh](test_stg2.sh)（邏輯完全一致，兩者互為對應）：
 ```powershell
 # Windows (PowerShell)
-.\test_stg2.ps1                  # 等同 --live，指向 stg2，自動吃 FEDGPT_STG2_TOKEN
+.\test_stg2.ps1                  # 等同 --live --llm-check，指向 stg2，自動吃 FEDGPT_STG2_TOKEN
 .\test_stg2.ps1 --notify-teams   # 後面接的參數都會轉給 run_check.py
 ```
 ```bash
 # Mac / Linux
 chmod +x test_stg2.sh              # 第一次用要先給執行權限
-./test_stg2.sh                     # 等同 --live，指向 stg2，自動吃 FEDGPT_STG2_TOKEN
+./test_stg2.sh                     # 等同 --live --llm-check，指向 stg2，自動吃 FEDGPT_STG2_TOKEN
 ./test_stg2.sh --notify-teams      # 後面接的參數都會轉給 run_check.py
 ```
+`test_stg2.ps1`/`test_stg2.sh` 已固定把 `--llm-check` 寫進指令裡，**每次用這兩支腳本都會跑 LLM 文字審查**（見下方「LLM 文字審查怎麼評分」），不需要另外加旗標；想跳過的話要改用「不透過包好的腳本」那種自己組 `run_check.py` 指令的方式，不要加 `--llm-check`。
 
 ⚠️ **`--live-write` 會真的建立、修改、刪除資料**，目前涵蓋 30 組測試（完整清單見第 7 節）。設計上測完會自動清除，建立的測試資料標題都會標成 `[agent-test] ...` 方便辨識，但這終究是會動到 live 環境資料的操作，跑之前想清楚指向的是哪個環境。幾個例外要特別注意：
 - **Knowledge V3 文件、Asura TTS/transcriptions 測試**會實際走 Asset V2 或 Asura 自己的上傳流程，上傳的測試檔案**永久留在 storage、無法清除**（這幾支 API 本身沒有查詢或刪除端點）——這是已知且接受的殘留，不是 bug。Asura transcriptions 連工作紀錄本身也沒有 DELETE，一樣永久留著。
@@ -79,7 +80,7 @@ chmod +x test_stg2.sh              # 第一次用要先給執行權限
 
 ### 常用指令速查
 
-**完整驗證（stg2，含全部 30 組 `--live-write`）**——目前涵蓋範圍最完整的跑法：
+**完整驗證（stg2，含全部 30 組 `--live-write` + LLM 文字審查）**——目前涵蓋範圍最完整的跑法：
 ```powershell
 # Windows
 .\test_stg2.ps1 --live-write --notify-teams
@@ -89,7 +90,7 @@ chmod +x test_stg2.sh              # 第一次用要先給執行權限
 ./test_stg2.sh --live-write --notify-teams
 ```
 
-**只想看有沒有變化，不用整組寫入測試**——不會建立/刪除任何真實資料，跑得快很多，適合日常快速確認：
+**只想看有沒有變化，不用整組寫入測試**——不會建立/刪除任何真實資料，比加 `--live-write` 快很多，適合日常快速確認（但一樣會跑 LLM 文字審查，仍有其呼叫成本與耗時，見上方說明）：
 ```powershell
 # Windows
 .\test_stg2.ps1
@@ -109,10 +110,24 @@ python run_check.py --base-url https://fedgpt-stg2-vm1.corp.ailabs.tw/swagger/do
 python run_check.py --diff-against v3.10
 ```
 
-**再加上 LLM 文字審查**（會呼叫真的 LLM API，較慢，也有真實花費）：
+**不透過 `test_stg2` 腳本、直接用 `run_check.py` 時要自己手動加 `--llm-check`**（腳本才是固定內建，直接呼叫 `run_check.py` 不會自動加）：
 ```bash
 python run_check.py --live-write --llm-check --notify-teams
 ```
+
+### LLM 文字審查怎麼評分
+
+`--llm-check`（見 [llm_check.py](agent/llm_check.py)）除了原本就有的「揪出具體問題」（描述含糊不清、或跟同一支 endpoint 裡別的描述互相矛盾），每支有寫 description 的 endpoint 還會額外拿到一個 **1-5 分的清晰度分數**（`llm_clarity_score` finding，info 等級），當作輔助參考：
+
+- **5 分**：完全清楚，沒有任何問題
+- **3 分**：堪用，但有一些含糊不清的地方
+- **1 分**：混亂/矛盾到會擋住串接
+- （2、4 分沒有明講定義，由 LLM 自己內插）
+
+幾個重要限制：
+- 這是 LLM 主觀判斷出來的分數，**不是用公式算出來的**（不是「issue 數 ÷ 描述數」之類），同一份文件換一次措辭、換一個模型版本，分數可能會飄動，不適合拿來做嚴格的長期趨勢比較。
+- Prompt 有特別要求「就算給高分也要照樣列出具體問題」，避免 LLM 為了給漂亮分數而少報問題——分數是**補充摘要**，不是拿來取代下面列出的具體 issue。
+- 分數只看「清不清楚、有沒有矛盾」，不評估文件寫得美不美、格式好不好，也不管有沒有寫 description（完全沒寫的欄位由 `checks.py` 的靜態規則抓，不會拿來影響 LLM 分數）。
 
 `--live`/`--live-write`/`--llm-check` 開始跑之前，會先打一支輕量端點確認 `--token` 有沒有過期或被撤銷（`check_token_valid`，見 [live_call.py](agent/live_call.py)）；驗證失敗會直接印出清楚的錯誤訊息並中止，不會往下跑一堆誤導性的結果。這是因為 token 失效時，如果沒有這個檢查，後面每支端點都會各自回報一個「回傳 401 但 spec 沒宣告」的 `undocumented_status_code`，報告會出現一整排看起來像是各自獨立的 spec 問題，其實共同原因只有一個。
 
