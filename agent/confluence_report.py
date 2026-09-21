@@ -16,7 +16,7 @@ from html import escape
 import requests
 
 from .config import derive_swagger_ui_url
-from .report import build_summary
+from .report import build_summary, compute_endpoint_pass_fail
 
 _SEVERITY_ORDER = ["error", "warning", "info"]
 _SEVERITY_LABEL = {"error": "🔴 Error", "warning": "🟡 Warning", "info": "🔵 Info"}
@@ -57,6 +57,8 @@ def build_confluence_body(findings, entries, base_url):
     generated_at = summary["generated_at"]
     swagger_ui_url = derive_swagger_ui_url(base_url)
 
+    endpoint_pass_count, endpoint_fail_count, endpoint_total = compute_endpoint_pass_fail(findings)
+
     by_phase = {}
     for f in findings:
         by_phase.setdefault(f.get("phase", "static"), []).append(f)
@@ -76,6 +78,8 @@ def build_confluence_body(findings, entries, base_url):
     for phase, phase_findings in by_phase.items():
         sections.append(f"<h2>{escape(phase)}（{len(phase_findings)} 筆）</h2>" + _findings_table(phase_findings))
 
+    endpoint_status_color = "red" if endpoint_fail_count else "green"
+
     summary_table = (
         "<table><tbody>"
         f'<tr><th>來源</th><td><a href="{escape(swagger_ui_url)}">{escape(swagger_ui_url)}</a></td></tr>'
@@ -84,7 +88,15 @@ def build_confluence_body(findings, entries, base_url):
         f"<tr><th>Error</th><td>{summary['by_severity'].get('error', 0)}</td></tr>"
         f"<tr><th>Warning</th><td>{summary['by_severity'].get('warning', 0)}</td></tr>"
         f"<tr><th>Info</th><td>{summary['by_severity'].get('info', 0)}</td></tr>"
-        "</tbody></table>"
+        + (
+            f"<tr><th>Endpoint Pass 率</th><td>{endpoint_pass_count}/{endpoint_total}"
+            f"（{endpoint_pass_count / endpoint_total * 100:.0f}%，"
+            f'<span data-type="status" data-color="{endpoint_status_color}">Fail {endpoint_fail_count} 支</span>，'
+            "合併計算 Error 發現與 LLM 審查 Fail）</td></tr>"
+            if endpoint_total
+            else ""
+        )
+        + "</tbody></table>"
     )
 
     return (

@@ -126,6 +126,16 @@ python run_check.py --live-write --llm-check --notify-teams
 
 `--live`/`--live-write`/`--llm-check` 開始跑之前，會先打一支輕量端點確認 `--token` 有沒有過期或被撤銷（`check_token_valid`，見 [live_call.py](agent/live_call.py)）；驗證失敗會直接印出清楚的錯誤訊息並中止，不會往下跑一堆誤導性的結果。這是因為 token 失效時，如果沒有這個檢查，後面每支端點都會各自回報一個「回傳 401 但 spec 沒宣告」的 `undocumented_status_code`，報告會出現一整排看起來像是各自獨立的 spec 問題，其實共同原因只有一個。
 
+### Endpoint Pass 率：把 Error 跟 LLM Fail 合在一起看
+
+上面那組 `llm_review_pass`/`llm_review_fail` 只反映 LLM 文字審查那一個 phase 的判斷。報告最上方另外有一個 **Endpoint Pass 率** 統計（`compute_endpoint_pass_fail`，見 [report.py](agent/report.py)），把 LLM 審查的 Fail 跟其他階段（static / live / live-write）打到同一支 endpoint 的 **Error** 等級發現合併看，變成一個統一的每支 endpoint Pass/Fail：
+
+- **判定單位**：跟 LLM Pass/Fail 一樣，以 endpoint（`path` + `method`）為單位，不是以單筆 finding 為單位。
+- **判定標準**：這支 endpoint 只要符合下面任一條件就是 **Fail**：(1) LLM 文字審查判它 `llm_review_fail`；(2) 任何階段（static/live/live-write）對它回報至少一筆 `error` 等級的發現（例如 `response_schema_mismatch`、`undocumented_status_code`）。兩者都沒有才算 **Pass**。
+- **範圍**：只計算「至少被某個階段點名過」的 endpoint——出現在 LLM 審查結果裡，或是有一筆帶 `path`/`method` 的 Error。像 `live_write_ok`、`live_write_permanent_residue` 這種不指向特定 endpoint（`path` 是 `None`）的訊息不算進來。
+- 這代表就算 LLM 審查這支 endpoint 的文字寫得很清楚（判 Pass），只要它在 live-write 測試裡回應跟 spec 對不上、或回了 spec 沒宣告的狀態碼，Endpoint Pass 率還是會把它算成 Fail——這正是原本分開看兩個指標時會漏掉的情況。
+- ⚠️ 這個統計也是「這次實際跑到的範圍」：只跑 `--live`（不含 `--live-write`）時，Asura zero-shot 500、chat/tabular 423、Helix `/enrollment` 500、Chat V2 schema mismatch 這幾個已知問題不會被打到，不會反映在這次的 Endpoint Pass 率裡——要看到這些已知問題算進去，要加上 `--live-write` 一起跑。
+
 ### 報告在哪裡看
 每次執行都會在 `reports/`（已加進 `.gitignore`）產生一份帶時間戳的 HTML 檔案，直接用瀏覽器開就能看。這個資料夾只在本機，不會自動分享出去。
 

@@ -14,6 +14,31 @@ def _esc(value):
     return html.escape(str(value)) if value is not None else ""
 
 
+def compute_endpoint_pass_fail(findings):
+    """每支 endpoint 一個 Pass/Fail，把 LLM 文字審查的結果跟其他階段（static/live/live_write）
+    的 Error 等級發現合併看：只要同一支 endpoint 有 llm_review_fail，或任何階段對它回報一筆
+    Error，就算 Fail；兩種原因都沒有才算 Pass。範圍是「這支 endpoint 至少被某個階段點名過」
+    （出現在 llm 審查結果，或是有一筆帶 path/method 的 Error），不含完全沒被檢查到的端點。
+    """
+    llm_status = {}
+    endpoints_with_error = set()
+    for f in findings:
+        key = (f.get("path"), f.get("method"))
+        if key == (None, None):
+            continue
+        if f["rule"] == "llm_review_pass":
+            llm_status[key] = "pass"
+        elif f["rule"] == "llm_review_fail":
+            llm_status[key] = "fail"
+        if f["severity"] == "error":
+            endpoints_with_error.add(key)
+
+    universe = set(llm_status) | endpoints_with_error
+    fail_count = sum(1 for key in universe if llm_status.get(key) == "fail" or key in endpoints_with_error)
+    total = len(universe)
+    return total - fail_count, fail_count, total
+
+
 def build_summary(findings, entries):
     by_severity = Counter(f["severity"] for f in findings)
     by_file = Counter(f["file"] for f in findings)
@@ -118,6 +143,8 @@ def render_html(findings, entries, base_url):
     has_diff = any(f.get("phase") == "diff" for f in findings)
     has_llm = any(f.get("phase") == "llm" for f in findings)
     has_live_write = any(f.get("phase") == "live_write" for f in findings)
+
+    endpoint_pass_count, endpoint_fail_count, endpoint_total = compute_endpoint_pass_fail(findings)
 
     file_rows = []
     for e in entries:
@@ -391,6 +418,7 @@ def render_html(findings, entries, base_url):
     <div class="tile tile-warning"><div class="tile-num">{summary['by_severity'].get('warning', 0)}</div><div class="tile-label">Warning</div></div>
     <div class="tile tile-info"><div class="tile-num">{summary['by_severity'].get('info', 0)}</div><div class="tile-label">Info</div></div>
     <div class="tile tile-ok"><div class="tile-num">{summary['num_clean_files']}/{summary['num_real_files']}</div><div class="tile-label">無發現的分頁</div></div>
+    {f'<div class="tile {"tile-error" if endpoint_fail_count else "tile-ok"}"><div class="tile-num">{endpoint_pass_count}/{endpoint_total} ({endpoint_pass_count / endpoint_total * 100:.0f}%)</div><div class="tile-label">Endpoint Pass 率（Error + LLM Fail 合計）</div></div>' if endpoint_total else ''}
   </div>
 
   <div class="file-pills">
