@@ -327,6 +327,7 @@ Agent 能檢查出「這裡沒寫 description」，但**不負責猜測正確的
 - `chat/knowledge` 對一個沒有索引內容的知識庫送訊息會回 404，但文件的 404 成因列表沒提到這種情況；且與 `agentic-rag`「同一套 params 規則」的說法不同，`agentic-rag` 對空知識庫沒有這個限制
 - `GET /chat/v2/tabulars` 沒有任何欄位可以判斷資源是否「ready for query」，實測部分既有資源會在送訊息時回 423（未宣告）
 - `POST /helix/v1/enrollment` 拒絕多說話者音檔時（`MULTIPLE_SPEAKERS`），回應的 `service`／`reason` 都是空字串，不符合 Error schema「`reason` 必填、程式請用它做分支」的說明
+- `POST /helix/v1/enrollment` 換成確認過的單人語音音檔後，`MULTIPLE_SPEAKERS` 這關過了，但緊接著穩定回 **500 Internal Server Error**（`{"service":"","reason":"","message":"500: Internal Server Error"}`），spec 沒有宣告這個狀態碼；重試一次結果一樣，不是偶發。跟音檔是不是單人無關（同一份音檔的 Asura 轉錄測試完全成功），比較像後端處理這支端點時有未預期的例外，是後端 bug 而非文件或測試音檔的問題
 - `POST /asura/v1/speeches:zero-shot` 的 `ZeroShotSpeechInput.input` 只把 `text` 標必填，`promptVoiceUrl`/`promptVoiceAssetKey` 都是選填，但兩個都不帶實際回 400，代表伺服器端其實兩者擇一是必填
 - `POST /asura/v1/speeches:zero-shot` 照 spec 建議的做法（走 `transcriptions:presign` 上傳、把 `assetKey` 填進 `promptVoiceAssetKey`）一律回 500（`http-gateway`／`data.unhandled`／`unexpected status code: 400`，代表上游回了 400 但這層沒處理、直接包成看不出原因的 500）。手動排查過排除是 assetKey 或模型名稱的問題：同一個 assetKey 打 `/transcriptions` 完全正常，換成已驗證能連得到的真實網址填 `promptVoiceUrl` 一樣回同一個 500——這支端點處理語音範本輸入的路徑本身壞了，比較像後端 bug 而非文件問題
 - `POST /auth/v2/logout` 的敘述文字寫「註銷後再用同一個 token 會拿到 401 auth.invalid-auth」，實測行為跟敘述一致，但正式的 `responses` 只宣告了 `200`，401 沒有列進去——文件的敘述段落跟正式的狀態碼清單對不上
