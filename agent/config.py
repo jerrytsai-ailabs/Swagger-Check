@@ -87,3 +87,13 @@ def derive_api_base_url(swagger_docs_base_url):
     """
     origin = swagger_docs_base_url.split("/swagger/")[0]
     return origin.rstrip("/") + "/api"
+
+
+def derive_swagger_ui_url(swagger_docs_base_url):
+    """從 swagger docs 的 base URL 推回可以在瀏覽器直接打開的 Swagger UI 首頁網址。
+
+    例：https://fedgpt-dev.corp.ailabs.tw/swagger/docs -> https://fedgpt-dev.corp.ailabs.tw/swagger/
+    （/swagger/docs 是給程式抓 spec 用的 JSON 目錄，人要看的話開 /swagger/ 才有介面）
+    """
+    origin = swagger_docs_base_url.split("/swagger/")[0]
+    return origin.rstrip("/") + "/swagger/"

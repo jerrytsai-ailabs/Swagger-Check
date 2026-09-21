@@ -15,6 +15,7 @@ from html import escape
 
 import requests
 
+from .config import derive_swagger_ui_url
 from .report import build_summary
 
 _SEVERITY_ORDER = ["error", "warning", "info"]
@@ -54,6 +55,7 @@ def build_confluence_body(findings, entries, base_url):
     """把 findings 轉成 Confluence storage format 的頁面內容（一段 HTML 字串）。"""
     summary = build_summary(findings, entries)
     generated_at = summary["generated_at"]
+    swagger_ui_url = derive_swagger_ui_url(base_url)
 
     by_phase = {}
     for f in findings:
@@ -76,7 +78,7 @@ def build_confluence_body(findings, entries, base_url):
 
     summary_table = (
         "<table><tbody>"
-        f"<tr><th>來源</th><td>{escape(base_url)}</td></tr>"
+        f'<tr><th>來源</th><td><a href="{escape(swagger_ui_url)}">{escape(swagger_ui_url)}</a></td></tr>'
         f"<tr><th>產生時間</th><td>{escape(generated_at)}</td></tr>"
         f"<tr><th>總發現數</th><td>{summary['total']}</td></tr>"
         f"<tr><th>Error</th><td>{summary['by_severity'].get('error', 0)}</td></tr>"

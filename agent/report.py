@@ -3,6 +3,8 @@ import re
 from collections import Counter
 from datetime import datetime, timezone
 
+from .config import derive_swagger_ui_url
+
 _SEVERITY_ORDER = {"error": 0, "warning": 1, "info": 2}
 _SEVERITY_LABEL = {"error": "Error", "warning": "Warning", "info": "Info"}
 _METHOD_ORDER = {"GET": 0, "POST": 1, "PUT": 2, "PATCH": 3, "DELETE": 4}
@@ -103,7 +105,8 @@ def _render_section(section_id, title, findings, note=None, open_by_default=True
 
 def render_html(findings, entries, base_url):
     summary = build_summary(findings, entries)
-    env_label, env_host = _environment_label(base_url)
+    env_label, _ = _environment_label(base_url)
+    swagger_ui_url = derive_swagger_ui_url(base_url)
 
     static_findings = [f for f in findings if f.get("phase", "static") == "static"]
     live_findings = [f for f in findings if f.get("phase") == "live"]
@@ -379,7 +382,7 @@ def render_html(findings, entries, base_url):
   <header class="page-head">
     <div class="eyebrow">API Review Agent <span class="env-badge">{_esc(env_label)}</span></div>
     <h1>Public Swagger 檢查報告</h1>
-    <div class="meta-line">來源 <span class="mono">{_esc(env_host)}</span> ・ 產生時間 <span class="mono">{_esc(summary['generated_at'])}</span></div>
+    <div class="meta-line">來源 <a class="mono" href="{_esc(swagger_ui_url)}" target="_blank" rel="noopener">{_esc(swagger_ui_url)}</a> ・ 產生時間 <span class="mono">{_esc(summary['generated_at'])}</span></div>
   </header>
 
   <div class="tiles">
