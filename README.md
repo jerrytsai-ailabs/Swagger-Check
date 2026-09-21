@@ -115,19 +115,14 @@ python run_check.py --diff-against v3.10
 python run_check.py --live-write --llm-check --notify-teams
 ```
 
-### LLM 文字審查怎麼評分
+### LLM 文字審查怎麼判定 Pass/Fail
 
-`--llm-check`（見 [llm_check.py](agent/llm_check.py)）除了原本就有的「揪出具體問題」（描述含糊不清、或跟同一支 endpoint 裡別的描述互相矛盾），每支有寫 description 的 endpoint 還會額外拿到一個 **1-5 分的清晰度分數**（`llm_clarity_score` finding，info 等級），當作輔助參考：
+`--llm-check`（見 [llm_check.py](agent/llm_check.py)）針對每支有寫 description 的 endpoint，揪出兩種具體問題（`llm_description_issue` finding）：描述含糊不清（warning）、或跟同一支 endpoint 裡別的描述互相矛盾（error）。在這之上，每支 endpoint 還會額外得到一個整體的 **Pass/Fail 結果**：
 
-- **5 分**：完全清楚，沒有任何問題
-- **3 分**：堪用，但有一些含糊不清的地方
-- **1 分**：混亂/矛盾到會擋住串接
-- （2、4 分沒有明講定義，由 LLM 自己內插）
-
-幾個重要限制：
-- 這是 LLM 主觀判斷出來的分數，**不是用公式算出來的**（不是「issue 數 ÷ 描述數」之類），同一份文件換一次措辭、換一個模型版本，分數可能會飄動，不適合拿來做嚴格的長期趨勢比較。
-- Prompt 有特別要求「就算給高分也要照樣列出具體問題」，避免 LLM 為了給漂亮分數而少報問題——分數是**補充摘要**，不是拿來取代下面列出的具體 issue。
-- 分數只看「清不清楚、有沒有矛盾」，不評估文件寫得美不美、格式好不好，也不管有沒有寫 description（完全沒寫的欄位由 `checks.py` 的靜態規則抓，不會拿來影響 LLM 分數）。
+- **判定單位**：整支 endpoint 一個結果，涵蓋它自己的 summary/description 加上 request/response 裡所有有寫的欄位說明一起看。
+- **判定標準**：只要這支 endpoint 有任何一筆 `llm_description_issue`（不論是 warning 還是 error）就是 **Fail**（`llm_review_fail`）；完全沒有問題才是 **Pass**（`llm_review_pass`，info 等級）。
+- **這是用程式碼推導出來的，不是另外叫 LLM 判斷**：Pass/Fail 就是「這支 endpoint 的 issues 清單是不是空的」，保證跟上面列出的具體問題完全一致，不會有「LLM 自己下的結論」跟「列出來的問題」對不上的情況（先前用 1-5 分讓 LLM 自己評分時就有這個風險，因此改掉）。
+- `llm_review_fail` 的嚴重度跟著裡面最嚴重的 issue 走：只要有一筆是邏輯矛盾（error），整支就是 error 等級的 Fail；只有含糊不清（warning）的話則是 warning 等級的 Fail。
 
 `--live`/`--live-write`/`--llm-check` 開始跑之前，會先打一支輕量端點確認 `--token` 有沒有過期或被撤銷（`check_token_valid`，見 [live_call.py](agent/live_call.py)）；驗證失敗會直接印出清楚的錯誤訊息並中止，不會往下跑一堆誤導性的結果。這是因為 token 失效時，如果沒有這個檢查，後面每支端點都會各自回報一個「回傳 401 但 spec 沒宣告」的 `undocumented_status_code`，報告會出現一整排看起來像是各自獨立的 spec 問題，其實共同原因只有一個。
 

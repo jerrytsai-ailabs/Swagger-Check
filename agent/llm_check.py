@@ -34,14 +34,10 @@ _SYSTEM_PROMPT = (
     "(2) does it logically contradict another description in this same list (or itself). "
     "Do NOT flag: missing descriptions (not your job), style, formatting, tone, or descriptions "
     "that are merely terse but unambiguous. Only flag real problems a careful reader would hit. "
-    "Also give one overall 1-5 clarity_score for THIS endpoint's descriptions as a whole (5 = "
-    "fully clear, no issues; 3 = usable but has some ambiguity; 1 = confusing/contradictory enough "
-    "to block integration). The score is a supplementary summary signal, not a substitute for the "
-    "issues list — still list every concrete problem in issues even when you also give a high score. "
     "Respond with exactly one JSON object, nothing else: "
-    '{"clarity_score": 1-5, "issues": [{"location": "<the label>", "severity": "error"|"warning", "message": "<why, in Traditional Chinese>"}]}. '
+    '{"issues": [{"location": "<the label>", "severity": "error"|"warning", "message": "<why, in Traditional Chinese>"}]}. '
     'Use "error" only for direct logical contradictions. Use "warning" for genuine ambiguity. '
-    'If there is nothing to flag, respond {"clarity_score": <score>, "issues": []}.'
+    'If there is nothing to flag, respond {"issues": []}.'
 )
 
 
@@ -135,9 +131,7 @@ def _call_llm(api_base_url, token, prompt_items, timeout):
     issues = parsed.get("issues")
     if not isinstance(issues, list):
         raise ValueError(f"預期 'issues' 是 list，實際拿到：{parsed!r}")
-    score = parsed.get("clarity_score")
-    score = score if isinstance(score, int) and 1 <= score <= 5 else None
-    return score, issues
+    return issues
 
 
 def run_llm_checks(entries, api_base_url, token, timeout=REQUEST_TIMEOUT_SECONDS * 3):
@@ -160,7 +154,7 @@ def run_llm_checks(entries, api_base_url, token, timeout=REQUEST_TIMEOUT_SECONDS
                 if not prompt_items:
                     continue
                 try:
-                    score, issues = _call_llm(api_base_url, token, prompt_items, timeout)
+                    issues = _call_llm(api_base_url, token, prompt_items, timeout)
                 except Exception as exc:  # noqa: BLE001 - LLM 呼叫/解析失敗要回報，不能讓一支 endpoint 中斷整輪
                     findings.append(
                         _finding(
@@ -174,21 +168,8 @@ def run_llm_checks(entries, api_base_url, token, timeout=REQUEST_TIMEOUT_SECONDS
                         )
                     )
                     continue
-                if score is not None:
-                    findings.append(
-                        _finding(
-                            "llm_clarity_score",
-                            "info",
-                            entry["filename"],
-                            entry["group"],
-                            f"文字清晰度評分：{score}/5（輔助參考，仍以下方具體 issues 為準）",
-                            path=path,
-                            method=method,
-                        )
-                    )
-                for issue in issues:
-                    if not isinstance(issue, dict):
-                        continue
+                valid_issues = [i for i in issues if isinstance(i, dict)]
+                for issue in valid_issues:
                     severity = issue.get("severity") if issue.get("severity") in ("error", "warning") else "warning"
                     findings.append(
                         _finding(
@@ -200,6 +181,34 @@ def run_llm_checks(entries, api_base_url, token, timeout=REQUEST_TIMEOUT_SECONDS
                             path=path,
                             method=method,
                             location=str(issue.get("location", "")),
+                        )
+                    )
+                # Pass/Fail 用推導的，不叫 LLM 額外判斷：有任何 issue（不論 error/warning）就是 Fail，
+                # 保證跟上面列出的 issues 清單一致，不會有「LLM 自己給的結論」跟「列出來的問題」對不上的情況。
+                if valid_issues:
+                    # Fail 本身的嚴重度跟著裡面最嚴重的 issue 走（有邏輯矛盾就是 error，只有含糊不清就是 warning）。
+                    fail_severity = "error" if any(i.get("severity") == "error" for i in valid_issues) else "warning"
+                    findings.append(
+                        _finding(
+                            "llm_review_fail",
+                            fail_severity,
+                            entry["filename"],
+                            entry["group"],
+                            f"文字審查結果：Fail（{len(valid_issues)} 筆問題，見上方 llm_description_issue）",
+                            path=path,
+                            method=method,
+                        )
+                    )
+                else:
+                    findings.append(
+                        _finding(
+                            "llm_review_pass",
+                            "info",
+                            entry["filename"],
+                            entry["group"],
+                            "文字審查結果：Pass（沒有發現含糊不清或邏輯矛盾的描述）",
+                            path=path,
+                            method=method,
                         )
                     )
 
