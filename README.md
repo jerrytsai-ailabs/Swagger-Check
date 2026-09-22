@@ -342,6 +342,19 @@ Agent 能檢查出「這裡沒寫 description」，但**不負責猜測正確的
 - 同上四個 mode 回應裡的 `humanInLoop` 欄位，schema 宣告型別是 `object`，但 stg2 實際回應是 `null`
 - 以上四點目前看起來比較像是 spec 標必填標過頭（這幾個欄位可能設計上就是選填/條件性才會出現，例如 `guardian` 分數可能只有開啟防護功能才有），還是後端功能還沒做完，需要熟悉 Chat V2 guardian／humanInLoop 實作的人確認實際設計意圖，Agent 這邊只能標出「宣告與實際不符」，無法判斷哪邊才是對的
 
+**Error Analysis：依根因量化排序修復優先順序**（方法參考 [hamel.dev 的 field guide](https://hamel.dev/blog/posts/field-guide/) 提到的「找出佔比最高的少數根因」做法，針對 [report-20260921-145003.html](reports/report-20260921-145003.html) 這次含 `--live-write` 的完整結果做的量化分類，之後每次重大變動可以重跑一次）：
+
+| 根因 | 筆數 | 佔全部 42 筆 Error 的比例 |
+|---|---|---|
+| Chat V2：`guardian.biasScore`/`hallucinationScore` 未回傳但 spec 標必填 | 8 | 19.0% |
+| Chat V2：`conversation.disabled` 未回傳但 spec 標必填 | 7 | 16.7% |
+| Chat V2：`sseEvents.content.role` 出現空字串，不在 enum 內 | 5 | 11.9% |
+| Chat V2：`Faq.description` 未回傳但 spec 標必填 | 5 | 11.9% |
+| Chat V2：`humanInLoop` 型別跟 spec 不符（null vs object） | 4 | 9.5% |
+| 其餘（Asura 500、Auth logout、tabular 423、Helix 500/502、Knowledge 423、FedFlow PENDING、LLM 文字審查等，各自獨立的個案問題） | 13 | 31.0% |
+
+**前 5 個根因全部集中在 Chat V2 一個分頁，合計佔了 69% 的 Error**（只影響 42 筆 Error 背後 17 支獨立 endpoint 中的少數幾支）。這代表優先讓熟悉 Chat V2 guardian/humanInLoop 實作的人確認、修正這 5 個欄位的 schema 或實作，投資報酬率遠高於逐一追查其餘分散在 Asura/Auth/Helix/Knowledge 各處、每個只佔 2.4% 的個案問題。
+
 **工具本身的 bug（非 spec 問題，記錄下來避免以後重踩）**：`_parse_sse_dialect_a` 一開始用 `resp.iter_lines(decode_unicode=True)` 解析 SSE 串流，`requests` 這個參數會在網路封包還沒重組成完整一行前就先解碼，中文字的 UTF-8 多位元組序列被切在封包邊界時會解碼壞掉、把一則 `data:` 誤判成兩行，導致 `chat/faq:stream`、`chat/tabular:stream` 這兩個「回應剛好含中文」的測試一直收不到任何 `event: data`。修正是改讀原始 bytes 再自己用 `\n` 分行（UTF-8 裡 `\n` 永遠是安全的分割點）、每行湊齊後才解碼。
 
 **營運上的注意事項（不是程式或 spec 問題）**：
