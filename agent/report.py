@@ -14,6 +14,18 @@ def _esc(value):
     return html.escape(str(value)) if value is not None else ""
 
 
+_BREAK_AFTER_RE = re.compile(r"([./_:{])")
+
+
+def _esc_breakable(value):
+    """跟 _esc 一樣會 escape，但在 . _ : {{ 這些識別字常見的分隔字元後面插入 <wbr>，
+    讓瀏覽器斷行斷在字義邊界（例如 responses.200.conversation 斷在句點後面），
+    而不是 overflow-wrap: anywhere 保底時那種斷在字中間的難讀斷法。
+    """
+    escaped = _esc(value)
+    return _BREAK_AFTER_RE.sub(r"\1<wbr>", escaped)
+
+
 def compute_endpoint_pass_fail(findings):
     """每支 endpoint 一個 Pass/Fail，把 LLM 文字審查的結果跟其他階段（static/live/live_write）
     的 Error 等級發現合併看：只要同一支 endpoint 有 llm_review_fail，或任何階段對它回報一筆
@@ -65,9 +77,9 @@ def _environment_label(base_url):
     return host.split(".")[0] if host else "unknown", host
 
 
-def _severity_chip(sev):
+def _severity_mark(sev):
     label = _SEVERITY_LABEL.get(sev, sev)
-    return f'<span class="chip chip-{_esc(sev)}">{_esc(label)}</span>'
+    return f'<span class="sev sev-{_esc(sev)}"><i></i>{_esc(label)}</span>'
 
 
 def _method_badge(method):
@@ -76,35 +88,35 @@ def _method_badge(method):
     return f'<span class="method method-{_esc(method)}">{_esc(method)}</span>'
 
 
-def _render_section(section_id, title, findings, note=None, open_by_default=True):
+def _render_chapter(number, section_id, title, findings, note=None, open_by_default=True):
     rows = []
     for f in sorted(findings, key=lambda f: (_SEVERITY_ORDER.get(f["severity"], 9), _METHOD_ORDER.get(f["method"] or "", 9), f["path"] or "")):
         endpoint = (
-            f'{_method_badge(f["method"])}<code>{_esc(f["path"])}</code>' if f["path"] else '<span class="muted">—</span>'
+            f'{_method_badge(f["method"])}<code>{_esc_breakable(f["path"])}</code>' if f["path"] else '<span class="muted">—</span>'
         )
-        location = f'<code class="loc">{_esc(f["location"])}</code>' if f["location"] else '<span class="muted">—</span>'
+        location = f'<code class="loc">{_esc_breakable(f["location"])}</code>' if f["location"] else '<span class="muted">—</span>'
         rows.append(
             f"""<tr>
-  <td>{_severity_chip(f["severity"])}</td>
-  <td>{_esc(f["group"])}<div class="muted mono">{_esc(f["file"])}</div></td>
+  <td>{_severity_mark(f["severity"])}</td>
+  <td>{_esc(f["group"])}<div class="muted mono">{_esc_breakable(f["file"])}</div></td>
   <td>{endpoint}</td>
   <td>{location}</td>
   <td>{_esc(f["message"])}</td>
-  <td><code class="rule">{_esc(f["rule"])}</code></td>
+  <td><code class="rule">{_esc_breakable(f["rule"])}</code></td>
 </tr>"""
         )
 
     counts = Counter(f["severity"] for f in findings)
-    count_chips = "".join(
-        f'<span class="count-chip count-chip-{sev}">{counts[sev]} {label}</span>'
+    tally = "".join(
+        f'<span class="tally-item ink-{sev}">{counts[sev]} {label}</span>'
         for sev, label in (("error", "error"), ("warning", "warning"), ("info", "info"))
         if counts.get(sev)
     )
     if not findings:
-        count_chips = '<span class="count-chip count-chip-ok">全部通過</span>'
+        tally = '<span class="tally-item ink-pass">全部通過</span>'
 
     body = (
-        f"""<div class="table-scroll"><table>
+        f"""<div class="table-scroll"><table class="ledger">
 <thead><tr><th>嚴重度</th><th>分頁</th><th>Endpoint</th><th>位置</th><th>訊息</th><th>規則</th></tr></thead>
 <tbody>
 {''.join(rows)}
@@ -114,14 +126,15 @@ def _render_section(section_id, title, findings, note=None, open_by_default=True
         else '<p class="empty">這個階段沒有發現任何問題。</p>'
     )
 
-    note_html = f'<p class="section-note">{_esc(note)}</p>' if note else ""
+    note_html = f'<p class="chapter-note">{_esc(note)}</p>' if note else ""
 
-    return f"""<details class="section" id="{section_id}" {"open" if open_by_default else ""}>
+    return f"""<details class="chapter" id="{section_id}" {"open" if open_by_default else ""}>
 <summary>
-  <span class="section-title">{_esc(title)}</span>
-  <span class="section-counts">{count_chips}</span>
+  <span class="chapter-num">{number:02d}</span>
+  <span class="chapter-title">{_esc(title)}</span>
+  <span class="chapter-tally">{tally}</span>
 </summary>
-<div class="section-body">
+<div class="chapter-body">
 {note_html}
 {body}
 </div>
@@ -146,29 +159,33 @@ def render_html(findings, entries, base_url):
 
     endpoint_pass_count, endpoint_fail_count, endpoint_total = compute_endpoint_pass_fail(findings)
 
-    file_rows = []
+    manifest_rows = []
     for e in entries:
         n = summary["by_file"].get(e["filename"], 0)
         if e["error"]:
-            status, css = "抓取失敗", "err"
+            status, css, mark = "抓取失敗", "manifest-fail", "✕"
         elif not e["is_real"]:
-            status, css = "說明用分頁", "muted-pill"
+            status, css, mark = "說明用分頁", "manifest-muted", "·"
         elif n == 0:
-            status, css = "沒問題", "ok"
+            status, css, mark = "沒問題", "manifest-ok", "✓"
         else:
-            status, css = f"{n} 個發現", "warn"
-        file_rows.append(
-            f"""<div class="file-pill file-pill-{css}">
-  <span class="file-pill-name">{_esc(e['group'])}</span>
-  <span class="file-pill-status">{_esc(status)}</span>
+            status, css, mark = f"{n} 個發現", "manifest-warn", str(n)
+        manifest_rows.append(
+            f"""<div class="manifest-row {css}">
+  <span class="manifest-mark">{mark}</span>
+  <span class="manifest-name">{_esc(e['group'])}</span>
+  <span class="manifest-status">{_esc(status)}</span>
 </div>"""
         )
 
-    sections = []
-    sections.append(_render_section("sec-static", "靜態比對 — Swagger 定義本身", static_findings))
+    chapters = []
+    chapters.append(_render_chapter(1, "sec-static", "靜態比對 — Swagger 定義本身", static_findings))
+    n = 1
     if has_live:
-        sections.append(
-            _render_section(
+        n += 1
+        chapters.append(
+            _render_chapter(
+                n,
                 "sec-live",
                 "Live Call — 唯讀端點（GET）",
                 live_findings,
@@ -176,8 +193,10 @@ def render_html(findings, entries, base_url):
             )
         )
     if has_live_write:
-        sections.append(
-            _render_section(
+        n += 1
+        chapters.append(
+            _render_chapter(
+                n,
                 "sec-live-write",
                 "Live Call — 寫入方法測試（POST/PUT/DELETE）",
                 live_write_findings,
@@ -185,8 +204,10 @@ def render_html(findings, entries, base_url):
             )
         )
     if has_diff:
-        sections.append(
-            _render_section(
+        n += 1
+        chapters.append(
+            _render_chapter(
+                n,
                 "sec-diff",
                 "與上次執行的差異",
                 diff_findings,
@@ -194,8 +215,10 @@ def render_html(findings, entries, base_url):
             )
         )
     if has_llm:
-        sections.append(
-            _render_section(
+        n += 1
+        chapters.append(
+            _render_chapter(
+                n,
                 "sec-llm",
                 "LLM 文字審查",
                 llm_findings,
@@ -203,196 +226,220 @@ def render_html(findings, entries, base_url):
             )
         )
 
-    return f"""<title>API Review Agent</title>
+    verdict = "fail" if endpoint_fail_count else "pass"
+    verdict_word = "FAIL" if endpoint_fail_count else "PASS"
+
+    return f"""<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>API Review Agent</title>
 <style>
   :root {{
-    --bg: #f3f7f7;
-    --surface: #ffffff;
-    --surface-2: #eef4f4;
-    --border: #d7e3e2;
-    --text: #16262a;
-    --text-muted: #5c7378;
-    --accent: #0f7a82;
-    --accent-soft: #e1f1f0;
-    --error: #b73326;
-    --error-soft: #fbe9e7;
-    --warning: #966210;
-    --warning-soft: #fbf1de;
-    --info: #34518f;
-    --info-soft: #e7ecf9;
-    --ok: #1f7a55;
-    --ok-soft: #e4f4ec;
-    --method-get: #2f6fb0;
-    --method-post: #1f8f63;
-    --method-put: #b3760f;
-    --method-patch: #7a52c9;
-    --method-delete: #c23b32;
-    --shadow: 0 1px 2px rgba(22, 38, 42, 0.06), 0 1px 1px rgba(22, 38, 42, 0.04);
+    --paper: #f5f3ea;
+    --paper-2: #ece7d6;
+    --surface: #fffdf7;
+    --rule: #d9d0b8;
+    --ink: #2a2418;
+    --ink-muted: #756c58;
+    --fail: #8c3020;
+    --fail-soft: #ede0d9;
+    --pass: #2b5d3f;
+    --pass-soft: #e2e9e0;
+    --warn: #8a5a12;
+    --warn-soft: #eee3cd;
+    --info: #2e4a66;
+    --info-soft: #e1e7ed;
+    --method-get: #2e4a66;
+    --method-post: #2b5d3f;
+    --method-put: #8a5a12;
+    --method-patch: #5b4b8a;
+    --method-delete: #8c3020;
+    --sheet-shadow: 0 1px 3px rgba(30, 26, 14, 0.07), 0 14px 34px rgba(30, 26, 14, 0.06);
   }}
   @media (prefers-color-scheme: dark) {{
     :root:not([data-theme="light"]) {{
-      --bg: #0f1b1d;
-      --surface: #16262a;
-      --surface-2: #1b2e31;
-      --border: #274043;
-      --text: #e7f1f0;
-      --text-muted: #93a9ac;
-      --accent: #52d2c8;
-      --accent-soft: #163531;
-      --error: #ef7266;
-      --error-soft: #3a1f1c;
-      --warning: #e5ac4c;
-      --warning-soft: #3a2c14;
-      --info: #8aabe8;
-      --info-soft: #1c2740;
-      --ok: #5ad39c;
-      --ok-soft: #143327;
-      --method-get: #6fa8e0;
-      --method-post: #5cc99a;
-      --method-put: #e5ac4c;
-      --method-patch: #b192ea;
-      --method-delete: #ef7266;
-      --shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+      --paper: #1b1913; --paper-2: #221f17; --surface: #221f17; --rule: #3c3627;
+      --ink: #ece5d4; --ink-muted: #a89c81;
+      --fail: #e2795e; --fail-soft: #3a2419;
+      --pass: #85c49b; --pass-soft: #1e2b21;
+      --warn: #d9a94b; --warn-soft: #332810;
+      --info: #93b3d1; --info-soft: #1c2733;
+      --method-get: #93b3d1; --method-post: #85c49b; --method-put: #d9a94b;
+      --method-patch: #b9a8e2; --method-delete: #e2795e;
+      --sheet-shadow: 0 1px 3px rgba(0, 0, 0, 0.4), 0 14px 34px rgba(0, 0, 0, 0.3);
     }}
   }}
   :root[data-theme="dark"] {{
-    --bg: #0f1b1d;
-    --surface: #16262a;
-    --surface-2: #1b2e31;
-    --border: #274043;
-    --text: #e7f1f0;
-    --text-muted: #93a9ac;
-    --accent: #52d2c8;
-    --accent-soft: #163531;
-    --error: #ef7266;
-    --error-soft: #3a1f1c;
-    --warning: #e5ac4c;
-    --warning-soft: #3a2c14;
-    --info: #8aabe8;
-    --info-soft: #1c2740;
-    --ok: #5ad39c;
-    --ok-soft: #143327;
-    --method-get: #6fa8e0;
-    --method-post: #5cc99a;
-    --method-put: #e5ac4c;
-    --method-patch: #b192ea;
-    --method-delete: #ef7266;
-    --shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --paper: #1b1913; --paper-2: #221f17; --surface: #221f17; --rule: #3c3627;
+    --ink: #ece5d4; --ink-muted: #a89c81;
+    --fail: #e2795e; --fail-soft: #3a2419;
+    --pass: #85c49b; --pass-soft: #1e2b21;
+    --warn: #d9a94b; --warn-soft: #332810;
+    --info: #93b3d1; --info-soft: #1c2733;
+    --method-get: #93b3d1; --method-post: #85c49b; --method-put: #d9a94b;
+    --method-patch: #b9a8e2; --method-delete: #e2795e;
+    --sheet-shadow: 0 1px 3px rgba(0, 0, 0, 0.4), 0 14px 34px rgba(0, 0, 0, 0.3);
   }}
 
   * {{ box-sizing: border-box; }}
+  @media (prefers-reduced-motion: reduce) {{ *, *::before, *::after {{ animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }} }}
+
   body {{
-    margin: 0;
-    background: var(--bg);
-    color: var(--text);
-    font-family: "IBM Plex Sans", -apple-system, "Microsoft JhengHei", sans-serif;
+    margin: 0; padding: 28px 20px 64px;
+    background: var(--paper-2);
+    color: var(--ink);
+    font-family: "IBM Plex Sans", "Noto Sans TC", -apple-system, "Microsoft JhengHei", sans-serif;
     font-size: 14.5px;
-    line-height: 1.55;
+    line-height: 1.6;
   }}
-  .wrap {{ max-width: 1440px; margin: 0 auto; padding: 40px 24px 80px; }}
   .mono {{ font-family: "IBM Plex Mono", ui-monospace, "SFMono-Regular", monospace; }}
-  code, .mono {{ font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 0.92em; }}
-  code {{ background: var(--surface-2); padding: 1px 6px; border-radius: 4px; color: var(--text); }}
-  code.loc {{ color: var(--text-muted); }}
-  code.rule {{ background: transparent; color: var(--text-muted); padding: 0; }}
+  code, .mono {{ font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 0.9em; }}
+  code {{ background: var(--paper-2); padding: 1px 6px; border-radius: 3px; color: var(--ink); }}
+  code.loc {{ color: var(--ink-muted); }}
+  code.rule {{ background: transparent; color: var(--ink-muted); padding: 0; }}
+  a {{ color: var(--info); }}
 
-  header.page-head {{ margin-bottom: 28px; }}
-  .eyebrow {{
-    display: inline-flex; align-items: center; gap: 6px;
-    font-size: 12px; letter-spacing: 0.06em; text-transform: uppercase;
-    color: var(--accent); font-weight: 600; margin-bottom: 10px;
+  .sheet {{
+    max-width: 1180px; margin: 0 auto;
+    background: var(--paper); border: 1px solid var(--rule); border-radius: 3px;
+    box-shadow: var(--sheet-shadow);
+    padding: 40px 48px 48px;
   }}
-  .env-badge {{
-    background: var(--accent-soft); color: var(--accent);
-    border-radius: 999px; padding: 2px 10px; font-size: 11px; font-weight: 700;
-    letter-spacing: 0.03em;
-  }}
-  h1 {{ font-size: 26px; font-weight: 600; margin: 0 0 8px; text-wrap: balance; letter-spacing: -0.01em; }}
-  .meta-line {{ color: var(--text-muted); font-size: 13px; }}
-  .meta-line .mono {{ color: var(--text); }}
+  @media (max-width: 720px) {{ .sheet {{ padding: 28px 18px 32px; }} }}
 
-  .tiles {{
-    display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
-    gap: 12px; margin: 24px 0 8px;
+  header.masthead {{ position: relative; padding-bottom: 22px; border-bottom: 2px solid var(--ink); margin-bottom: 26px; }}
+  .masthead-top {{ display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 18px; }}
+  .tool-id {{ font-family: "IBM Plex Mono", monospace; font-size: 12px; color: var(--ink-muted); }}
+  .classification {{
+    font-family: "IBM Plex Mono", monospace; font-size: 11px; font-weight: 600;
+    letter-spacing: 0.08em; color: var(--ink-muted); border: 1px solid var(--rule);
+    border-radius: 3px; padding: 2px 8px;
   }}
-  .tile {{
-    background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
-    padding: 14px 16px; box-shadow: var(--shadow);
+  h1 {{
+    font-family: "Source Serif 4", "Noto Serif TC", Georgia, serif;
+    font-size: 32px; font-weight: 600; margin: 0 0 16px; letter-spacing: -0.005em;
+    max-width: 560px; padding-right: 140px;
   }}
-  .tile .tile-num {{ font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.1; }}
-  .tile .tile-label {{ font-size: 12px; color: var(--text-muted); margin-top: 4px; }}
-  .tile-error .tile-num {{ color: var(--error); }}
-  .tile-warning .tile-num {{ color: var(--warning); }}
-  .tile-info .tile-num {{ color: var(--info); }}
-  .tile-ok .tile-num {{ color: var(--ok); }}
+  @media (max-width: 720px) {{ h1 {{ padding-right: 0; }} }}
+  dl.meta {{ display: flex; flex-wrap: wrap; gap: 6px 40px; margin: 0; }}
+  dl.meta > div {{ display: flex; flex-direction: column; gap: 2px; }}
+  dl.meta dt {{ font-size: 11px; color: var(--ink-muted); }}
+  dl.meta dd {{ margin: 0; font-size: 13.5px; }}
+  dl.meta dd a {{ text-decoration-color: var(--rule); }}
 
-  .file-pills {{ display: flex; flex-wrap: wrap; gap: 8px; margin: 20px 0 32px; }}
-  .file-pill {{
-    display: flex; align-items: center; gap: 8px;
-    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
-    padding: 6px 10px; font-size: 12.5px; box-shadow: var(--shadow);
+  .stamp {{
+    position: absolute; top: -6px; right: 4px; width: 128px; height: 128px;
+    border-radius: 50%; border: 3px double currentColor;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    transform: rotate(-9deg); background: transparent;
+    animation: stamp-in 0.5s cubic-bezier(0.34, 1.56, 0.64, 1) both;
   }}
-  .file-pill-name {{ font-weight: 600; }}
-  .file-pill-status {{ color: var(--text-muted); }}
-  .file-pill-ok .file-pill-status {{ color: var(--ok); }}
-  .file-pill-warn .file-pill-status {{ color: var(--warning); font-weight: 600; }}
-  .file-pill-err .file-pill-status {{ color: var(--error); font-weight: 600; }}
-  .file-pill-muted-pill {{ opacity: 0.55; }}
+  @keyframes stamp-in {{ from {{ opacity: 0; transform: rotate(-9deg) scale(1.5); }} to {{ opacity: 1; transform: rotate(-9deg) scale(1); }} }}
+  .stamp-pass {{ color: var(--pass); }}
+  .stamp-fail {{ color: var(--fail); }}
+  .stamp-word {{ font-family: "Source Serif 4", serif; font-weight: 700; font-size: 22px; letter-spacing: 0.06em; }}
+  .stamp-ratio {{ font-family: "IBM Plex Mono", monospace; font-size: 12.5px; margin-top: 2px; }}
+  .stamp-caption {{ font-family: "IBM Plex Mono", monospace; font-size: 8.5px; letter-spacing: 0.03em; margin-top: 1px; }}
+  @media (max-width: 720px) {{
+    .stamp {{ position: static; margin: 4px 0 18px; transform: rotate(-4deg); }}
+  }}
 
-  details.section {{
-    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
-    margin-bottom: 16px; box-shadow: var(--shadow); overflow: hidden;
+  dl.stat-strip {{
+    display: flex; flex-wrap: wrap; margin: 0 0 30px; border: 1px solid var(--rule); border-radius: 3px;
+    background: var(--surface); overflow: hidden;
   }}
-  details.section > summary {{
-    list-style: none; cursor: pointer; padding: 16px 20px;
-    display: flex; align-items: center; justify-content: space-between; gap: 16px;
-    flex-wrap: wrap;
+  dl.stat-strip > div {{
+    flex: 1 1 130px; padding: 12px 16px; border-right: 1px solid var(--rule);
   }}
-  details.section > summary::-webkit-details-marker {{ display: none; }}
-  details.section > summary::before {{
-    content: "▸"; display: inline-block; margin-right: 10px; color: var(--text-muted);
+  dl.stat-strip > div:last-child {{ border-right: none; }}
+  dl.stat-strip dt {{ font-size: 11px; color: var(--ink-muted); margin: 0 0 3px; }}
+  dl.stat-strip dd {{ margin: 0; font-family: "IBM Plex Mono", monospace; font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }}
+  dl.stat-strip dd.ink-error {{ color: var(--fail); }}
+  dl.stat-strip dd.ink-warning {{ color: var(--warn); }}
+  dl.stat-strip dd.ink-info {{ color: var(--info); }}
+
+  .manifest {{ margin-bottom: 30px; }}
+  .manifest-title {{
+    font-size: 12px; font-weight: 600; color: var(--ink-muted); margin: 0 0 10px;
+    padding-bottom: 6px; border-bottom: 1px solid var(--rule);
+  }}
+  .manifest-grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 0 24px; }}
+  .manifest-row {{
+    display: flex; align-items: baseline; gap: 9px; padding: 6px 0;
+    border-bottom: 1px solid var(--rule); font-size: 13px;
+  }}
+  .manifest-mark {{ font-family: "IBM Plex Mono", monospace; font-weight: 700; width: 16px; text-align: center; flex-shrink: 0; }}
+  .manifest-ok .manifest-mark {{ color: var(--pass); }}
+  .manifest-warn .manifest-mark {{ color: var(--fail); }}
+  .manifest-fail .manifest-mark {{ color: var(--fail); }}
+  .manifest-muted .manifest-mark {{ color: var(--ink-muted); }}
+  .manifest-name {{ font-weight: 600; flex: 1; }}
+  .manifest-status {{ color: var(--ink-muted); font-size: 12px; white-space: nowrap; }}
+  .manifest-warn .manifest-status, .manifest-fail .manifest-status {{ color: var(--fail); font-weight: 600; }}
+  .manifest-muted {{ opacity: 0.6; }}
+
+  details.chapter {{ border-bottom: 1px solid var(--rule); }}
+  details.chapter:first-of-type {{ border-top: 2px solid var(--ink); }}
+  details.chapter > summary {{
+    list-style: none; cursor: pointer; padding: 16px 4px;
+    display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap;
+  }}
+  details.chapter > summary::-webkit-details-marker {{ display: none; }}
+  .chapter-num {{
+    font-family: "Source Serif 4", serif; font-size: 20px; color: var(--ink-muted);
+    width: 30px; flex-shrink: 0;
+  }}
+  .chapter-title {{ font-weight: 600; font-size: 15.5px; flex: 1; min-width: 200px; }}
+  .chapter-title::before {{
+    content: "▸"; display: inline-block; margin-right: 8px; color: var(--ink-muted); font-size: 11px;
     transition: transform 0.15s ease;
   }}
-  details.section[open] > summary::before {{ transform: rotate(90deg); }}
-  .section-title {{ font-weight: 600; font-size: 15.5px; display: flex; align-items: center; }}
-  .section-counts {{ display: flex; gap: 6px; flex-wrap: wrap; }}
-  .count-chip {{
-    font-size: 11.5px; font-weight: 700; padding: 2px 9px; border-radius: 999px;
-    font-variant-numeric: tabular-nums;
+  details.chapter[open] > summary .chapter-title::before {{ transform: rotate(90deg); }}
+  .chapter-tally {{ display: flex; gap: 14px; flex-wrap: wrap; }}
+  .tally-item {{ font-size: 12.5px; font-weight: 600; font-variant-numeric: tabular-nums; }}
+  .ink-error {{ color: var(--fail); }}
+  .ink-warning {{ color: var(--warn); }}
+  .ink-info {{ color: var(--info); }}
+  .ink-pass {{ color: var(--pass); }}
+
+  .chapter-body {{ padding: 0 4px 22px 44px; }}
+  .chapter-note {{ color: var(--ink-muted); font-size: 13px; margin: 0 0 14px; max-width: 72ch; }}
+  .empty {{ color: var(--pass); font-weight: 600; padding: 4px 0 4px; }}
+
+  .table-scroll {{ overflow-x: auto; }}
+  table.ledger {{ border-collapse: collapse; width: 100%; table-layout: fixed; font-size: 13px; }}
+  table.ledger th, table.ledger td {{
+    padding: 9px 10px; text-align: left; vertical-align: top;
+    border-bottom: 1px solid var(--rule); word-break: break-word; overflow-wrap: anywhere;
   }}
-  .count-chip-error {{ background: var(--error-soft); color: var(--error); }}
-  .count-chip-warning {{ background: var(--warning-soft); color: var(--warning); }}
-  .count-chip-info {{ background: var(--info-soft); color: var(--info); }}
-  .count-chip-ok {{ background: var(--ok-soft); color: var(--ok); }}
-
-  .section-body {{ padding: 0 20px 20px; border-top: 1px solid var(--border); }}
-  .section-note {{ color: var(--text-muted); font-size: 13px; margin: 14px 0 10px; }}
-  .empty {{ color: var(--ok); font-weight: 600; padding: 16px 0 4px; }}
-
-  .table-scroll {{ overflow-x: auto; margin-top: 12px; }}
-  table {{ border-collapse: collapse; width: 100%; table-layout: fixed; font-size: 13px; }}
-  th, td {{ padding: 8px 10px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--border); word-break: break-word; overflow-wrap: anywhere; }}
-  th {{ color: var(--text-muted); font-weight: 600; font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.04em; }}
-  tbody tr:last-child td {{ border-bottom: none; }}
-  th:nth-child(1), td:nth-child(1) {{ width: 8%; }}
-  th:nth-child(2), td:nth-child(2) {{ width: 11%; }}
-  th:nth-child(3), td:nth-child(3) {{ width: 20%; }}
-  th:nth-child(4), td:nth-child(4) {{ width: 12%; }}
-  th:nth-child(5), td:nth-child(5) {{ width: 36%; }}
-  th:nth-child(6), td:nth-child(6) {{ width: 13%; }}
+  table.ledger th {{ color: var(--ink-muted); font-weight: 600; font-size: 11px; }}
+  table.ledger tbody tr:last-child td {{ border-bottom: none; }}
+  table.ledger tbody tr:hover {{ background: var(--surface); }}
+  table.ledger th:nth-child(1), table.ledger td:nth-child(1) {{ width: 9%; }}
+  table.ledger th:nth-child(2), table.ledger td:nth-child(2) {{ width: 11%; }}
+  table.ledger th:nth-child(3), table.ledger td:nth-child(3) {{ width: 20%; }}
+  table.ledger th:nth-child(4), table.ledger td:nth-child(4) {{ width: 12%; }}
+  table.ledger th:nth-child(5), table.ledger td:nth-child(5) {{ width: 35%; }}
+  table.ledger th:nth-child(6), table.ledger td:nth-child(6) {{ width: 13%; }}
   @media (max-width: 640px) {{
-    table {{ table-layout: auto; min-width: 640px; }}
-    th:nth-child(n), td:nth-child(n) {{ width: auto; }}
+    table.ledger {{ table-layout: auto; min-width: 640px; }}
+    table.ledger th:nth-child(n), table.ledger td:nth-child(n) {{ width: auto; }}
   }}
 
-  .chip {{ font-size: 11.5px; font-weight: 700; padding: 2px 8px; border-radius: 6px; white-space: nowrap; }}
-  .chip-error {{ background: var(--error-soft); color: var(--error); }}
-  .chip-warning {{ background: var(--warning-soft); color: var(--warning); }}
-  .chip-info {{ background: var(--info-soft); color: var(--info); }}
+  .sev {{ display: inline-flex; align-items: center; gap: 6px; font-weight: 600; font-size: 12.5px; white-space: nowrap; }}
+  .sev i {{ width: 8px; height: 8px; flex-shrink: 0; }}
+  .sev-error {{ color: var(--fail); }}
+  .sev-error i {{ background: var(--fail); }}
+  .sev-warning {{ color: var(--warn); }}
+  .sev-warning i {{ background: var(--warn); }}
+  .sev-info {{ color: var(--info); }}
+  .sev-info i {{ background: var(--info); }}
 
   .method {{
-    display: inline-block; font-family: "IBM Plex Mono", monospace; font-size: 10.5px; font-weight: 700;
-    padding: 1px 6px; border-radius: 4px; margin-right: 6px; color: #fff; letter-spacing: 0.02em;
+    display: inline-block; font-family: "IBM Plex Mono", monospace; font-size: 10px; font-weight: 700;
+    padding: 1px 6px; border-radius: 3px; margin-right: 6px; color: var(--paper); letter-spacing: 0.02em;
   }}
   .method-GET {{ background: var(--method-get); }}
   .method-POST {{ background: var(--method-post); }}
@@ -400,35 +447,56 @@ def render_html(findings, entries, base_url):
   .method-PATCH {{ background: var(--method-patch); }}
   .method-DELETE {{ background: var(--method-delete); }}
 
-  .muted {{ color: var(--text-muted); }}
-  footer.page-foot {{ margin-top: 32px; color: var(--text-muted); font-size: 12px; border-top: 1px solid var(--border); padding-top: 16px; }}
+  .muted {{ color: var(--ink-muted); }}
+  footer.colophon {{
+    margin-top: 36px; color: var(--ink-muted); font-size: 12px;
+    border-top: 1px solid var(--rule); padding-top: 14px; max-width: 72ch;
+  }}
 </style>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
-
-<div class="wrap">
-  <header class="page-head">
-    <div class="eyebrow">API Review Agent <span class="env-badge">{_esc(env_label)}</span></div>
-    <h1>Public Swagger 檢查報告</h1>
-    <div class="meta-line">來源 <a class="mono" href="{_esc(swagger_ui_url)}" target="_blank" rel="noopener">{_esc(swagger_ui_url)}</a> ・ 產生時間 <span class="mono">{_esc(summary['generated_at'])}</span></div>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,500;8..60,600;8..60,700&family=Noto+Serif+TC:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&family=Noto+Sans+TC:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+</head>
+<body>
+<div class="sheet">
+  <header class="masthead">
+    <div class="stamp stamp-{verdict}">
+      <span class="stamp-word">{verdict_word}</span>
+      <span class="stamp-ratio">{endpoint_pass_count}/{endpoint_total}</span>
+      <span class="stamp-caption">ENDPOINTS</span>
+    </div>
+    <div class="masthead-top">
+      <span class="tool-id">api-review-agent</span>
+      <span class="classification">{_esc(env_label)}</span>
+    </div>
+    <h1>Public Swagger 稽核報告</h1>
+    <dl class="meta">
+      <div><dt>來源</dt><dd><a class="mono" href="{_esc(swagger_ui_url)}" target="_blank" rel="noopener">{_esc(swagger_ui_url)}</a></dd></div>
+      <div><dt>產生時間</dt><dd class="mono">{_esc(summary['generated_at'])}</dd></div>
+    </dl>
   </header>
 
-  <div class="tiles">
-    <div class="tile"><div class="tile-num">{summary['total']}</div><div class="tile-label">總發現數</div></div>
-    <div class="tile tile-error"><div class="tile-num">{summary['by_severity'].get('error', 0)}</div><div class="tile-label">Error</div></div>
-    <div class="tile tile-warning"><div class="tile-num">{summary['by_severity'].get('warning', 0)}</div><div class="tile-label">Warning</div></div>
-    <div class="tile tile-info"><div class="tile-num">{summary['by_severity'].get('info', 0)}</div><div class="tile-label">Info</div></div>
-    <div class="tile tile-ok"><div class="tile-num">{summary['num_clean_files']}/{summary['num_real_files']}</div><div class="tile-label">無發現的分頁</div></div>
-    {f'<div class="tile {"tile-error" if endpoint_fail_count else "tile-ok"}"><div class="tile-num">{endpoint_pass_count}/{endpoint_total} ({endpoint_pass_count / endpoint_total * 100:.0f}%)</div><div class="tile-label">Endpoint Pass 率（Error + LLM Fail 合計）</div></div>' if endpoint_total else ''}
+  <dl class="stat-strip">
+    <div><dt>總發現數</dt><dd>{summary['total']}</dd></div>
+    <div><dt>Error</dt><dd class="ink-error">{summary['by_severity'].get('error', 0)}</dd></div>
+    <div><dt>Warning</dt><dd class="ink-warning">{summary['by_severity'].get('warning', 0)}</dd></div>
+    <div><dt>Info</dt><dd class="ink-info">{summary['by_severity'].get('info', 0)}</dd></div>
+    <div><dt>無發現的分頁</dt><dd>{summary['num_clean_files']}/{summary['num_real_files']}</dd></div>
+  </dl>
+
+  <div class="manifest">
+    <div class="manifest-title">受檢規格清單</div>
+    <div class="manifest-grid">
+{''.join(manifest_rows)}
+    </div>
   </div>
 
-  <div class="file-pills">
-{''.join(file_rows)}
+  <div class="chapters">
+    {''.join(chapters)}
   </div>
 
-  {''.join(sections)}
-
-  <footer class="page-foot">
+  <footer class="colophon">
     靜態比對涵蓋 Swagger 定義本身是否完整、一致；其餘各階段的涵蓋範圍見各區塊內的說明。展開／收合各區塊可以聚焦想看的部分。
   </footer>
 </div>
+</body>
+</html>
 """
