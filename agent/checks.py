@@ -131,15 +131,15 @@ def check_operation_docs(entry):
 
 
 def check_public_prefix(entry):
-    """R3: 檢查 path 是否遵循 /public/ 命名慣例（已知例外不報）。"""
+    """R3: 檢查 path 是否遵循 /api/public/ 命名慣例（已知例外不報）。"""
     findings = []
     spec = entry["spec"]
     if not spec:
         return findings
     for path in (spec.get("paths") or {}).keys():
-        if path == "/*":
+        if path == "/api/*":
             continue  # Common / SSE 分頁的佔位路徑
-        if path.startswith("/public/"):
+        if path.startswith("/api/public/"):
             continue
         if (entry["filename"], path) in KNOWN_NON_PUBLIC_EXCEPTIONS:
             continue
@@ -149,7 +149,7 @@ def check_public_prefix(entry):
                 "info",
                 entry["filename"],
                 entry["group"],
-                "這個 path 沒有 /public/ 前綴，確認是否為刻意保留的相容路徑（若是，麻煩在 description 講明原因）",
+                "這個 path 沒有 /api/public/ 前綴，確認是否為刻意保留的相容路徑（若是，麻煩在 description 講明原因）",
                 path=path,
             )
         )

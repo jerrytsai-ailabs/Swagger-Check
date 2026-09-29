@@ -112,7 +112,7 @@ def _collect_operation_descriptions(op, spec):
 def _call_llm(api_base_url, token, prompt_items, timeout):
     labeled = "\n\n".join(f"[{label}]\n{text}" for label, text in prompt_items)
     resp = requests.post(
-        f"{api_base_url.rstrip('/')}/public/llm/v1/fedgpt/v1/chat/completions",
+        f"{api_base_url.rstrip('/')}/api/public/llm/v1/fedgpt/v1/chat/completions",
         headers={"X-Access-Token": token, "Content-Type": "application/json"},
         json={
             "model": LLM_MODEL,

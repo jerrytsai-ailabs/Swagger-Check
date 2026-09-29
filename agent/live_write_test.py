@@ -185,7 +185,7 @@ def _asset_v2_presign_and_upload(
     filename,
     content_type,
     content,
-    presign_path="/public/asset/v2/assets:presign",
+    presign_path="/api/public/asset/v2/assets:presign",
     presign_spec_label=("asset-v2.yaml", "Asset V2"),
 ):
     """走 presign + 實際上傳流程，回傳 assetKey；失敗回傳 None（findings 已記錄原因）。
@@ -450,17 +450,17 @@ def _run_simple_crud_test(
 def _chat_prerequisite(session, base, timeout, findings, filename, group):
     """Chat V2 建立對話需要先取一個有效的 model id。"""
     try:
-        resp = session.get(f"{base}/public/chat/v2/models", timeout=timeout)
+        resp = session.get(f"{base}/api/public/chat/v2/models", timeout=timeout)
         resp.raise_for_status()
         models = resp.json().get("models") or []
         if not models:
             findings.append(
-                _finding("live_write_error", "error", filename, group, "GET /models 沒有回傳任何模型，無法建立測試對話", path="/public/chat/v2/models", method="GET")
+                _finding("live_write_error", "error", filename, group, "GET /models 沒有回傳任何模型，無法建立測試對話", path="/api/public/chat/v2/models", method="GET")
             )
             return None
         return {"mode": "normal", "model": models[0]["id"]}
     except Exception as exc:  # noqa: BLE001
-        findings.append(_finding("live_write_error", "error", filename, group, f"取得模型清單失敗：{exc}", path="/public/chat/v2/models", method="GET"))
+        findings.append(_finding("live_write_error", "error", filename, group, f"取得模型清單失敗：{exc}", path="/api/public/chat/v2/models", method="GET"))
         return None
 
 
@@ -473,8 +473,8 @@ def run_conversation_crud_test(entries, api_base_url, token, timeout=30):
         filename="chat-v2.yaml",
         group="Chat V2",
         resource_label="對話",
-        create_path="/public/chat/v2/conversations",
-        item_path_template="/public/chat/v2/conversations/{convId}",
+        create_path="/api/public/chat/v2/conversations",
+        item_path_template="/api/public/chat/v2/conversations/{convId}",
         wrapper_key="conversation",
         id_field="convId",
         name_field="title",
@@ -491,8 +491,8 @@ def run_faq_crud_test(entries, api_base_url, token, timeout=30):
         filename="faq-v1.yaml",
         group="FAQ V1",
         resource_label="問答集",
-        create_path="/public/faq/v1/faqs",
-        item_path_template="/public/faq/v1/faqs/{faqId}",
+        create_path="/api/public/faq/v1/faqs",
+        item_path_template="/api/public/faq/v1/faqs/{faqId}",
         wrapper_key="faq",
         id_field="faqId",
         name_field="name",
@@ -516,10 +516,10 @@ def run_faq_entry_crud_test(entries, api_base_url, token, timeout=30):
 
     spec = entry_spec["spec"]
     paths = spec.get("paths") or {}
-    faqs_path = "/public/faq/v1/faqs"
-    faq_item_path_template = "/public/faq/v1/faqs/{faqId}"
-    entries_path_template = "/public/faq/v1/faqs/{faqId}/entries"
-    entry_item_path_template = "/public/faq/v1/faqs/{faqId}/entries/{entryId}"
+    faqs_path = "/api/public/faq/v1/faqs"
+    faq_item_path_template = "/api/public/faq/v1/faqs/{faqId}"
+    entries_path_template = "/api/public/faq/v1/faqs/{faqId}/entries"
+    entry_item_path_template = "/api/public/faq/v1/faqs/{faqId}/entries/{entryId}"
 
     def op_of(path, method):
         op = paths[path][method]
@@ -696,8 +696,8 @@ def run_knowledge_crud_test(entries, api_base_url, token, timeout=30):
         filename="knowledge-v3.yaml",
         group="Knowledge V3",
         resource_label="知識庫",
-        create_path="/public/knowledge/v3/knowledges",
-        item_path_template="/public/knowledge/v3/knowledges/{knowledgeId}",
+        create_path="/api/public/knowledge/v3/knowledges",
+        item_path_template="/api/public/knowledge/v3/knowledges/{knowledgeId}",
         wrapper_key="knowledge",
         id_field="knowledgeId",
         name_field="name",
@@ -734,11 +734,11 @@ def run_knowledge_document_crud_test(entries, api_base_url, token, timeout=30):
     kb_op = _make_op_of(kb_spec, kb_paths)
     asset_op = _make_op_of(asset_spec, asset_paths)
 
-    knowledges_path = "/public/knowledge/v3/knowledges"
-    knowledge_item_path_template = "/public/knowledge/v3/knowledges/{knowledgeId}"
-    documents_path_template = "/public/knowledge/v3/knowledges/{knowledgeId}/documents"
-    document_item_path_template = "/public/knowledge/v3/knowledges/{knowledgeId}/documents/{documentId}"
-    presign_path = "/public/asset/v2/assets:presign"
+    knowledges_path = "/api/public/knowledge/v3/knowledges"
+    knowledge_item_path_template = "/api/public/knowledge/v3/knowledges/{knowledgeId}"
+    documents_path_template = "/api/public/knowledge/v3/knowledges/{knowledgeId}/documents"
+    document_item_path_template = "/api/public/knowledge/v3/knowledges/{knowledgeId}/documents/{documentId}"
+    presign_path = "/api/public/asset/v2/assets:presign"
 
     session = _make_session(token)
     base = api_base_url.rstrip("/")
@@ -1070,8 +1070,8 @@ def run_fedflow_execute_test(entries, api_base_url, token, timeout=20, flow_id=N
     if spec is None:
         return findings
     op_of = _make_op_of(spec, paths)
-    execute_path_template = "/public/fedflow/v1/flows/{flowId}/execute"
-    result_path_template = "/public/fedflow/v1/executions/{executionId}/result"
+    execute_path_template = "/api/public/fedflow/v1/flows/{flowId}/execute"
+    result_path_template = "/api/public/fedflow/v1/executions/{executionId}/result"
 
     session = _make_session(token)
     base = api_base_url.rstrip("/")
@@ -1206,9 +1206,9 @@ def run_helix_voice_crud_test(entries, api_base_url, token, timeout=60):
     op_of = _make_op_of(spec, paths)
     asset_op = _make_op_of(asset_spec, asset_paths)
 
-    voices_path = "/public/helix/v1/voices"
-    voice_item_path_template = "/public/helix/v1/voices/{voiceId}"
-    presign_path = "/public/asset/v2/assets:presign"
+    voices_path = "/api/public/helix/v1/voices"
+    voice_item_path_template = "/api/public/helix/v1/voices/{voiceId}"
+    presign_path = "/api/public/asset/v2/assets:presign"
 
     session = _make_session(token)
     base = api_base_url.rstrip("/")
@@ -1378,8 +1378,8 @@ def run_auth_apikey_crud_test(entries, api_base_url, token, timeout=30):
         return findings
     op_of = _make_op_of(spec, paths)
 
-    apikeys_path = "/public/auth/v2/apikeys"
-    batch_delete_path = "/public/auth/v2/apikeys:batchDelete"
+    apikeys_path = "/api/public/auth/v2/apikeys"
+    batch_delete_path = "/api/public/auth/v2/apikeys:batchDelete"
 
     session = _make_session(token)
     base = api_base_url.rstrip("/")
@@ -1489,7 +1489,7 @@ def run_llm_embeddings_test(entries, api_base_url, token, timeout=30):
         return findings
     op_of = _make_op_of(spec, paths)
 
-    embeddings_path = "/public/llm/v1/retriever/v1/embeddings"
+    embeddings_path = "/api/public/llm/v1/retriever/v1/embeddings"
     session = _make_session(token)
     base = api_base_url.rstrip("/")
 
@@ -1544,7 +1544,7 @@ def run_asura_tts_test(entries, api_base_url, token, timeout=60):
         return findings
     op_of = _make_op_of(spec, paths)
 
-    tts_path = "/public/asura/v1/speeches:stream"
+    tts_path = "/api/public/asura/v1/speeches:stream"
     session = _make_session(token)
     base = api_base_url.rstrip("/")
 
@@ -1662,10 +1662,10 @@ def run_chat_send_message_test(entries, api_base_url, token, timeout=90):
         return findings
     op_of = _make_op_of(spec, paths)
 
-    conversations_path = "/public/chat/v2/conversations"
-    conversation_item_path_template = "/public/chat/v2/conversations/{convId}"
-    chat_normal_path = "/public/chat/v2/chat/normal"
-    models_path = "/public/chat/v2/models"
+    conversations_path = "/api/public/chat/v2/conversations"
+    conversation_item_path_template = "/api/public/chat/v2/conversations/{convId}"
+    chat_normal_path = "/api/public/chat/v2/chat/normal"
+    models_path = "/api/public/chat/v2/models"
 
     session = _make_session(token)
     base = api_base_url.rstrip("/")
@@ -1781,9 +1781,9 @@ def _run_chat_mode_test(entries, api_base_url, token, timeout, *, mode, chat_pat
         return findings
     op_of = _make_op_of(spec, paths)
 
-    conversations_path = "/public/chat/v2/conversations"
-    conversation_item_path_template = "/public/chat/v2/conversations/{convId}"
-    models_path = "/public/chat/v2/models"
+    conversations_path = "/api/public/chat/v2/conversations"
+    conversation_item_path_template = "/api/public/chat/v2/conversations/{convId}"
+    models_path = "/api/public/chat/v2/models"
 
     session = _make_session(token)
     base = api_base_url.rstrip("/")
@@ -1899,7 +1899,7 @@ def _run_chat_mode_test(entries, api_base_url, token, timeout, *, mode, chat_pat
 
 def _prepare_knowledge_params(session, base, timeout, findings):
     """為 chat/knowledge 與 chat/agenticRag 建立一個臨時知識庫，回傳 (params, cleanup_fn)。"""
-    knowledges_path = "/public/knowledge/v3/knowledges"
+    knowledges_path = "/api/public/knowledge/v3/knowledges"
     filename, group = "chat-v2.yaml", "Chat V2"
 
     # 名稱要每次呼叫都不同：這個 helper 會被 knowledge/agentic-rag 的一般版與串流版共 4 個測試各呼叫一次，
@@ -2023,7 +2023,7 @@ def _prepare_knowledge_params(session, base, timeout, findings):
 
 def _prepare_faq_params(session, base, timeout, findings):
     """為 chat/faq 建立一個臨時 FAQ 容器，回傳 (params, cleanup_fn)。"""
-    faqs_path = "/public/faq/v1/faqs"
+    faqs_path = "/api/public/faq/v1/faqs"
     filename, group = "chat-v2.yaml", "Chat V2"
 
     # 名稱加隨機後綴：這個 helper 被 faq 的一般版與串流版兩個測試各呼叫一次，固定名稱在
@@ -2062,7 +2062,7 @@ def _prepare_faq_params(session, base, timeout, findings):
 
 def _prepare_tabular_params(session, base, timeout, findings):
     """為 chat/tabular 查詢帳號名下既有的 tabular 資源，沒有就跳過（這支沒有建立端點）。"""
-    tabulars_path = "/public/chat/v2/tabulars"
+    tabulars_path = "/api/public/chat/v2/tabulars"
     filename, group = "chat-v2.yaml", "Chat V2"
 
     try:
@@ -2100,22 +2100,22 @@ def _prepare_tabular_params(session, base, timeout, findings):
 
 def run_chat_knowledge_mode_test(entries, api_base_url, token, timeout=90):
     return _run_chat_mode_test(
-        entries, api_base_url, token, timeout, mode="knowledge", chat_path="/public/chat/v2/chat/knowledge", mode_label="knowledge", prepare_params_fn=_prepare_knowledge_params
+        entries, api_base_url, token, timeout, mode="knowledge", chat_path="/api/public/chat/v2/chat/knowledge", mode_label="knowledge", prepare_params_fn=_prepare_knowledge_params
     )
 
 
 def run_chat_agentic_rag_mode_test(entries, api_base_url, token, timeout=90):
     return _run_chat_mode_test(
-        entries, api_base_url, token, timeout, mode="agentic-rag", chat_path="/public/chat/v2/chat/agenticRag", mode_label="agentic-rag", prepare_params_fn=_prepare_knowledge_params
+        entries, api_base_url, token, timeout, mode="agentic-rag", chat_path="/api/public/chat/v2/chat/agenticRag", mode_label="agentic-rag", prepare_params_fn=_prepare_knowledge_params
     )
 
 
 def run_chat_faq_mode_test(entries, api_base_url, token, timeout=90):
-    return _run_chat_mode_test(entries, api_base_url, token, timeout, mode="faq", chat_path="/public/chat/v2/chat/faq", mode_label="faq", prepare_params_fn=_prepare_faq_params)
+    return _run_chat_mode_test(entries, api_base_url, token, timeout, mode="faq", chat_path="/api/public/chat/v2/chat/faq", mode_label="faq", prepare_params_fn=_prepare_faq_params)
 
 
 def run_chat_tabular_mode_test(entries, api_base_url, token, timeout=90):
-    return _run_chat_mode_test(entries, api_base_url, token, timeout, mode="tabular", chat_path="/public/chat/v2/chat/tabular", mode_label="tabular", prepare_params_fn=_prepare_tabular_params)
+    return _run_chat_mode_test(entries, api_base_url, token, timeout, mode="tabular", chat_path="/api/public/chat/v2/chat/tabular", mode_label="tabular", prepare_params_fn=_prepare_tabular_params)
 
 
 def run_admin_apikey_crud_test(entries, api_base_url, token, timeout=30):
@@ -2140,9 +2140,9 @@ def run_admin_apikey_crud_test(entries, api_base_url, token, timeout=30):
         findings.append(_finding("live_write_skipped", "info", filename, group, "無法從 token 本地解碼出 user_id，跳過這組測試"))
         return findings
 
-    apikeys_by_user_path_template = "/public/admin/v1/apikeys/{userId}"
-    apikeys_create_path = "/public/admin/v1/apikeys"
-    batch_delete_path = "/public/admin/v1/apikeys:batchDelete"
+    apikeys_by_user_path_template = "/api/public/admin/v1/apikeys/{userId}"
+    apikeys_create_path = "/api/public/admin/v1/apikeys"
+    batch_delete_path = "/api/public/admin/v1/apikeys:batchDelete"
     apikeys_by_user_path = apikeys_by_user_path_template.replace("{userId}", user_id)
 
     session = _make_session(token)
@@ -2274,9 +2274,9 @@ def run_asura_transcription_test(entries, api_base_url, token, timeout=60):
         return findings
     op_of = _make_op_of(spec, paths)
 
-    transcriptions_path = "/public/asura/v1/transcriptions"
-    transcription_item_path_template = "/public/asura/v1/transcriptions/{transcriptionId}"
-    presign_path = "/public/asura/v1/transcriptions:presign"
+    transcriptions_path = "/api/public/asura/v1/transcriptions"
+    transcription_item_path_template = "/api/public/asura/v1/transcriptions/{transcriptionId}"
+    presign_path = "/api/public/asura/v1/transcriptions:presign"
 
     session = _make_session(token)
     base = api_base_url.rstrip("/")
@@ -2408,7 +2408,7 @@ def run_asura_neartime_token_test(entries, api_base_url, token, timeout=30):
         return findings
     op_of = _make_op_of(spec, paths)
 
-    neartime_path = "/public/asura/v1/neartime/token"
+    neartime_path = "/api/public/asura/v1/neartime/token"
     session = _make_session(token)
     base = api_base_url.rstrip("/")
 
@@ -2470,10 +2470,10 @@ def run_chat_normal_stream_test(entries, api_base_url, token, timeout=90):
         return findings
     op_of = _make_op_of(spec, paths)
 
-    conversations_path = "/public/chat/v2/conversations"
-    conversation_item_path_template = "/public/chat/v2/conversations/{convId}"
-    chat_stream_path = "/public/chat/v2/chat/normal:stream"
-    models_path = "/public/chat/v2/models"
+    conversations_path = "/api/public/chat/v2/conversations"
+    conversation_item_path_template = "/api/public/chat/v2/conversations/{convId}"
+    chat_stream_path = "/api/public/chat/v2/chat/normal:stream"
+    models_path = "/api/public/chat/v2/models"
 
     session = _make_session(token)
     base = api_base_url.rstrip("/")
@@ -2597,9 +2597,9 @@ def _run_chat_mode_stream_test(entries, api_base_url, token, timeout, *, mode, c
         return findings
     op_of = _make_op_of(spec, paths)
 
-    conversations_path = "/public/chat/v2/conversations"
-    conversation_item_path_template = "/public/chat/v2/conversations/{convId}"
-    models_path = "/public/chat/v2/models"
+    conversations_path = "/api/public/chat/v2/conversations"
+    conversation_item_path_template = "/api/public/chat/v2/conversations/{convId}"
+    models_path = "/api/public/chat/v2/models"
 
     session = _make_session(token)
     base = api_base_url.rstrip("/")
@@ -2741,25 +2741,25 @@ def _run_chat_mode_stream_test(entries, api_base_url, token, timeout, *, mode, c
 
 def run_chat_knowledge_stream_test(entries, api_base_url, token, timeout=90):
     return _run_chat_mode_stream_test(
-        entries, api_base_url, token, timeout, mode="knowledge", chat_stream_path="/public/chat/v2/chat/knowledge:stream", mode_label="knowledge", prepare_params_fn=_prepare_knowledge_params
+        entries, api_base_url, token, timeout, mode="knowledge", chat_stream_path="/api/public/chat/v2/chat/knowledge:stream", mode_label="knowledge", prepare_params_fn=_prepare_knowledge_params
     )
 
 
 def run_chat_agentic_rag_stream_test(entries, api_base_url, token, timeout=90):
     return _run_chat_mode_stream_test(
-        entries, api_base_url, token, timeout, mode="agentic-rag", chat_stream_path="/public/chat/v2/chat/agenticRag:stream", mode_label="agentic-rag", prepare_params_fn=_prepare_knowledge_params
+        entries, api_base_url, token, timeout, mode="agentic-rag", chat_stream_path="/api/public/chat/v2/chat/agenticRag:stream", mode_label="agentic-rag", prepare_params_fn=_prepare_knowledge_params
     )
 
 
 def run_chat_faq_stream_test(entries, api_base_url, token, timeout=90):
     return _run_chat_mode_stream_test(
-        entries, api_base_url, token, timeout, mode="faq", chat_stream_path="/public/chat/v2/chat/faq:stream", mode_label="faq", prepare_params_fn=_prepare_faq_params
+        entries, api_base_url, token, timeout, mode="faq", chat_stream_path="/api/public/chat/v2/chat/faq:stream", mode_label="faq", prepare_params_fn=_prepare_faq_params
     )
 
 
 def run_chat_tabular_stream_test(entries, api_base_url, token, timeout=90):
     return _run_chat_mode_stream_test(
-        entries, api_base_url, token, timeout, mode="tabular", chat_stream_path="/public/chat/v2/chat/tabular:stream", mode_label="tabular", prepare_params_fn=_prepare_tabular_params
+        entries, api_base_url, token, timeout, mode="tabular", chat_stream_path="/api/public/chat/v2/chat/tabular:stream", mode_label="tabular", prepare_params_fn=_prepare_tabular_params
     )
 
 
@@ -2777,7 +2777,7 @@ def run_llm_visual_completions_test(entries, api_base_url, token, timeout=60):
         return findings
     op_of = _make_op_of(spec, paths)
 
-    visual_path = "/public/llm/v1/visual/v1/chat/completions"
+    visual_path = "/api/public/llm/v1/visual/v1/chat/completions"
     test_image_url = "https://httpbin.org/image/jpeg"
 
     session = _make_session(token)
@@ -2868,7 +2868,7 @@ def run_helix_enrollment_test(entries, api_base_url, token, timeout=60):
         return findings
     op_of = _make_op_of(spec, paths)
 
-    enrollment_path = "/public/helix/v1/enrollment"
+    enrollment_path = "/api/public/helix/v1/enrollment"
 
     session = _make_session(HELIX_ENROLLMENT_TEST_TOKEN)
     base = api_base_url.rstrip("/")
@@ -3049,8 +3049,8 @@ def run_asura_speech_zero_shot_test(entries, api_base_url, token, timeout=60):
         return findings
     op_of = _make_op_of(spec, paths)
 
-    zero_shot_path = "/public/asura/v1/speeches:zero-shot"
-    presign_path = "/public/asura/v1/transcriptions:presign"
+    zero_shot_path = "/api/public/asura/v1/speeches:zero-shot"
+    presign_path = "/api/public/asura/v1/transcriptions:presign"
 
     session = _make_session(token)
     base = api_base_url.rstrip("/")
@@ -3209,9 +3209,9 @@ def run_helix_voice_search_by_audio_test(entries, api_base_url, token, timeout=1
         return findings
     op_of = _make_op_of(spec, paths)
 
-    voices_path = "/public/helix/v1/voices"
-    voice_item_path_template = "/public/helix/v1/voices/{voiceId}"
-    search_path = "/public/helix/v1/voices:searchByAudio"
+    voices_path = "/api/public/helix/v1/voices"
+    voice_item_path_template = "/api/public/helix/v1/voices/{voiceId}"
+    search_path = "/api/public/helix/v1/voices:searchByAudio"
 
     session = _make_session(token)
     base = api_base_url.rstrip("/")
@@ -3335,8 +3335,8 @@ def run_llm_chat_completions_test(entries, api_base_url, token, timeout=60):
         return findings
     op_of = _make_op_of(spec, paths)
 
-    models_path = "/public/llm/v1/fedgpt/v1/models"
-    completions_path = "/public/llm/v1/fedgpt/v1/chat/completions"
+    models_path = "/api/public/llm/v1/fedgpt/v1/models"
+    completions_path = "/api/public/llm/v1/fedgpt/v1/chat/completions"
 
     session = _make_session(token)
     base = api_base_url.rstrip("/")
@@ -3442,8 +3442,8 @@ def run_auth_login_logout_test(entries, api_base_url, token, timeout=30):
         return findings
     op_of = _make_op_of(spec, paths)
 
-    login_path = "/public/auth/v2/fedgpt/login"
-    logout_path = "/public/auth/v2/logout"
+    login_path = "/api/public/auth/v2/fedgpt/login"
+    logout_path = "/api/public/auth/v2/logout"
     base = api_base_url.rstrip("/")
 
     session = requests.Session()
@@ -3551,9 +3551,9 @@ def run_auth_ldap_login_test(entries, api_base_url, token, timeout=30):
         return findings
     op_of = _make_op_of(spec, paths)
 
-    providers_path = "/public/auth/v2/providers"
-    login_path = "/public/auth/v2/ldap/login"
-    logout_path = "/public/auth/v2/logout"
+    providers_path = "/api/public/auth/v2/providers"
+    login_path = "/api/public/auth/v2/ldap/login"
+    logout_path = "/api/public/auth/v2/logout"
     base = api_base_url.rstrip("/")
 
     session = requests.Session()

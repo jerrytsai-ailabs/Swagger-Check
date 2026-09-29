@@ -28,7 +28,7 @@ HTTP_METHODS = {"get", "post", "put", "patch", "delete", "options", "head"}
 # 允許不帶 /public/ 前綴、但已知是刻意保留的相容路徑（file, path）。
 # 目前只發現 fedflow-v1.yaml 這一條，spec 內文有明講原因。新增例外前請先確認 description 有沒有講清楚。
 KNOWN_NON_PUBLIC_EXCEPTIONS = {
-    ("fedflow-v1.yaml", "/fedflow/v1/flows/summary"),
+    ("fedflow-v1.yaml", "/api/fedflow/v1/flows/summary"),
 }
 
 GOOGLE_CHAT_WEBHOOK_URL = os.environ.get("GOOGLE_CHAT_WEBHOOK_URL", "")
@@ -80,13 +80,14 @@ AUTH_LOGIN_TEST_PASSWORD = os.environ.get("AUTH_LOGIN_TEST_PASSWORD", "")
 
 
 def derive_api_base_url(swagger_docs_base_url):
-    """從 swagger docs 的 base URL 推回實際打 API 要用的 origin + /api。
+    """從 swagger docs 的 base URL 推回實際打 API 要用的 origin。
 
-    例：https://fedgpt-dev.corp.ailabs.tw/swagger/docs -> https://fedgpt-dev.corp.ailabs.tw/api
-    （對應每份 spec 裡 servers[0].url: /api 這個相對路徑）
+    例：https://fedgpt-dev.corp.ailabs.tw/swagger/docs -> https://fedgpt-dev.corp.ailabs.tw
+    （對應每份 spec 裡 servers[0].url: / ——FEDGPT-16706 之後 /api 前綴已經寫進每條 path 本身，
+    例如 /api/public/auth/v2/providers，這裡不能再自己補 /api，否則會變成 /api/api/...）
     """
     origin = swagger_docs_base_url.split("/swagger/")[0]
-    return origin.rstrip("/") + "/api"
+    return origin.rstrip("/")
 
 
 def derive_swagger_ui_url(swagger_docs_base_url):

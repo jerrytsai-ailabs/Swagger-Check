@@ -266,7 +266,7 @@ def check_token_valid(api_base_url, token, timeout=REQUEST_TIMEOUT_SECONDS):
 
     回傳 None 代表 token 沒問題；否則回傳一句可以直接印給人看的錯誤訊息。
     """
-    url = f"{api_base_url.rstrip('/')}/public/auth/v2/apikeys"
+    url = f"{api_base_url.rstrip('/')}/api/public/auth/v2/apikeys"
     try:
         resp = requests.get(url, headers={"X-Access-Token": token}, timeout=timeout)
     except requests.RequestException as exc:
