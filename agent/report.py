@@ -226,8 +226,13 @@ def render_html(findings, entries, base_url):
             )
         )
 
-    verdict = "fail" if endpoint_fail_count else "pass"
-    verdict_word = "FAIL" if endpoint_fail_count else "PASS"
+    if not endpoint_total:
+        # 只跑靜態檢查時沒有任何 endpoint 被評估，顯示 PASS 會誤導
+        verdict, verdict_word = "none", "未評估"
+    else:
+        verdict = "fail" if endpoint_fail_count else "pass"
+        verdict_word = "FAIL" if endpoint_fail_count else "PASS"
+    pass_rate = f"{endpoint_pass_count / endpoint_total * 100:.1f}%" if endpoint_total else "—"
 
     return f"""<!DOCTYPE html>
 <html lang="zh-Hant">
@@ -320,31 +325,26 @@ def render_html(findings, entries, base_url):
   h1 {{
     font-family: "Source Serif 4", "Noto Serif TC", Georgia, serif;
     font-size: 32px; font-weight: 600; margin: 0 0 16px; letter-spacing: -0.005em;
-    max-width: 560px; padding-right: 140px;
+    max-width: 560px;
   }}
-  @media (max-width: 720px) {{ h1 {{ padding-right: 0; }} }}
   dl.meta {{ display: flex; flex-wrap: wrap; gap: 6px 40px; margin: 0; }}
   dl.meta > div {{ display: flex; flex-direction: column; gap: 2px; }}
   dl.meta dt {{ font-size: 11px; color: var(--ink-muted); }}
   dl.meta dd {{ margin: 0; font-size: 13.5px; }}
   dl.meta dd a {{ text-decoration-color: var(--rule); }}
 
-  .stamp {{
-    position: absolute; top: -6px; right: 4px; width: 128px; height: 128px;
-    border-radius: 50%; border: 3px double currentColor;
-    display: flex; flex-direction: column; align-items: center; justify-content: center;
-    transform: rotate(-9deg); background: transparent;
-    animation: stamp-in 0.5s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+  .verdict-scroll {{ margin: 0 0 16px; }}
+  table.verdict {{
+    width: 100%; border-collapse: collapse; background: var(--surface);
+    border: 1px solid var(--rule); font-size: 13.5px;
   }}
-  @keyframes stamp-in {{ from {{ opacity: 0; transform: rotate(-9deg) scale(1.5); }} to {{ opacity: 1; transform: rotate(-9deg) scale(1); }} }}
-  .stamp-pass {{ color: var(--pass); }}
-  .stamp-fail {{ color: var(--fail); }}
-  .stamp-word {{ font-family: "Source Serif 4", serif; font-weight: 700; font-size: 22px; letter-spacing: 0.06em; }}
-  .stamp-ratio {{ font-family: "IBM Plex Mono", monospace; font-size: 12.5px; margin-top: 2px; }}
-  .stamp-caption {{ font-family: "IBM Plex Mono", monospace; font-size: 8.5px; letter-spacing: 0.03em; margin-top: 1px; }}
-  @media (max-width: 720px) {{
-    .stamp {{ position: static; margin: 4px 0 18px; transform: rotate(-4deg); }}
-  }}
+  table.verdict th, table.verdict td {{ padding: 8px 14px; border: 1px solid var(--rule); text-align: left; }}
+  table.verdict th {{ font-size: 11px; font-weight: 600; color: var(--ink-muted); background: var(--paper-2); }}
+  table.verdict td {{ font-family: "IBM Plex Mono", monospace; font-variant-numeric: tabular-nums; }}
+  table.verdict td.verdict-pass {{ color: var(--pass); font-weight: 700; }}
+  table.verdict td.verdict-fail {{ color: var(--fail); font-weight: 700; }}
+  table.verdict td.verdict-none {{ color: var(--ink-muted); font-weight: 700; }}
+  @media (max-width: 480px) {{ table.verdict th, table.verdict td {{ padding: 6px 7px; }} }}
 
   dl.stat-strip {{
     display: flex; flex-wrap: wrap; margin: 0 0 30px; border: 1px solid var(--rule); border-radius: 3px;
@@ -458,11 +458,6 @@ def render_html(findings, entries, base_url):
 <body>
 <div class="sheet">
   <header class="masthead">
-    <div class="stamp stamp-{verdict}">
-      <span class="stamp-word">{verdict_word}</span>
-      <span class="stamp-ratio">{endpoint_pass_count}/{endpoint_total}</span>
-      <span class="stamp-caption">ENDPOINTS</span>
-    </div>
     <div class="masthead-top">
       <span class="tool-id">api-review-agent</span>
       <span class="classification">{_esc(env_label)}</span>
@@ -473,6 +468,17 @@ def render_html(findings, entries, base_url):
       <div><dt>產生時間</dt><dd class="mono">{_esc(summary['generated_at'])}</dd></div>
     </dl>
   </header>
+
+  <div class="table-scroll verdict-scroll"><table class="verdict">
+<thead><tr><th>整體結果</th><th>Pass</th><th>Fail</th><th>Endpoint 總數</th><th>Pass 率</th></tr></thead>
+<tbody><tr>
+  <td class="verdict-{verdict}">{verdict_word}</td>
+  <td>{endpoint_pass_count}</td>
+  <td>{endpoint_fail_count}</td>
+  <td>{endpoint_total}</td>
+  <td>{pass_rate}</td>
+</tr></tbody>
+</table></div>
 
   <dl class="stat-strip">
     <div><dt>總發現數</dt><dd>{summary['total']}</dd></div>
