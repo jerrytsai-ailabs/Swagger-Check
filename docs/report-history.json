@@ -1,0 +1,17 @@
+[
+  {
+    "generated_at": "2026-09-29 11:43:59 +0800",
+    "env": "stg2",
+    "phases": [
+      "static",
+      "live",
+      "llm"
+    ],
+    "endpoint_pass": 76,
+    "endpoint_fail": 5,
+    "endpoint_total": 81,
+    "error": 19,
+    "warning": 40,
+    "info": 80
+  }
+]

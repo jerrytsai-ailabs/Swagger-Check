@@ -70,6 +70,7 @@ from agent.live_write_test import (
 )
 from agent.llm_check import run_llm_checks
 from agent.report import render_html
+from agent.report_md import write_markdown_report
 from agent.spec_diff import SNAPSHOT_DIR_DEFAULT, run_spec_diff, spec_version
 from agent.teams_notify import build_teams_payload, post_to_teams
 
@@ -79,6 +80,7 @@ def main():
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help="Swagger docs 目錄的 base URL")
     parser.add_argument("--local", metavar="DIR", help="不對外抓取，改用本機資料夾裡的 YAML（離線測試用）")
     parser.add_argument("--output-dir", default="reports", help="HTML report 輸出資料夾")
+    parser.add_argument("--docs-dir", default="docs", help="Markdown 報告（REPORT.md）與執行歷史（report-history.json）的輸出資料夾")
     parser.add_argument("--notify", action="store_true", help="把摘要推到 Google Chat")
     parser.add_argument("--webhook-url", default=GOOGLE_CHAT_WEBHOOK_URL, help="覆寫 GOOGLE_CHAT_WEBHOOK_URL")
     parser.add_argument("--notify-teams", action="store_true", help="把摘要推到 Microsoft Teams")
@@ -206,6 +208,8 @@ def main():
     with open(report_path, "w", encoding="utf-8") as fh:
         fh.write(render_html(findings, entries, source_label))
     print(f"HTML report 已寫入：{os.path.abspath(report_path)}")
+    md_path = write_markdown_report(findings, entries, source_label, args.docs_dir)
+    print(f"Markdown report 已更新：{os.path.abspath(md_path)}")
 
     # 推播訊息裡的報告連結：設了 REPORT_LINK_URL 就指到那個固定網址（建議指到
     # CONFLUENCE_REPORT_PAGE_ID 那頁），沒設就退回本機檔案路徑，見 config.py 的說明。

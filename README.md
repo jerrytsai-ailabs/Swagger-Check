@@ -139,6 +139,8 @@ python run_check.py --live-write --llm-check --notify-teams
 ### 報告在哪裡看
 每次執行都會在 `reports/`（已加進 `.gitignore`）產生一份帶時間戳的 HTML 檔案，直接用瀏覽器開就能看。這個資料夾只在本機，不會自動分享出去。
 
+**Markdown 摘要（進版控、持續更新）**：每次執行也會自動覆寫 [docs/REPORT.md](docs/REPORT.md)，並把這次的 Pass 率與 Error/Warning/Info 數量 append 到 `docs/report-history.json`（REPORT.md 裡的「執行歷史」表就是從這份 JSON 產生的）。這兩個檔案要 commit 進 git，之後用 `git diff docs/REPORT.md` 就能看出這次比上次多了/少了哪些問題。為了讓 diff 好讀，同一個根因的多筆發現會合併成一行（例如 `conversations.0`～`.4` 合併為 `conversations.N` ×5）、Info 只列數量、LLM 文字審查的細項放在最後（每次結果會有些浮動）。輸出位置可以用 `--docs-dir` 改。
+
 **線上共用連結：Confluence（推薦）**——加上 `--notify-confluence` 就會把這次完整結果更新到 `CONFLUENCE_REPORT_PAGE_ID` 那頁固定的 Confluence 頁面（[API Review Agent — 最新報告](https://ailabstw.atlassian.net/wiki/spaces/FEDGPT/pages/469303303/API+Review+Agent)），網址永遠不變。這是直接打 **Confluence 公開的 REST API**（`agent/confluence_report.py`），不透過 Claude，也**不綁定任何人的帳號**——每個人在 `.env` 填自己的 `CONFLUENCE_EMAIL`/`CONFLUENCE_API_TOKEN`，只要在目標 space 有編輯權限就能更新到同一頁，這點跟下面的 Claude Artifact 不一樣。呈現上是純表格（沒有摺疊分類、深色模式），不是完整搬運 `reports/` 那份互動式 HTML。
 
 ```bash
