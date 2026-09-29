@@ -13,5 +13,22 @@
     "error": 19,
     "warning": 40,
     "info": 80
+  },
+  {
+    "generated_at": "2026-09-29 15:06:44 +0800",
+    "env": "stg2",
+    "phases": [
+      "static",
+      "live",
+      "live_write",
+      "diff",
+      "llm"
+    ],
+    "endpoint_pass": 63,
+    "endpoint_fail": 18,
+    "endpoint_total": 81,
+    "error": 45,
+    "warning": 48,
+    "info": 124
   }
 ]
