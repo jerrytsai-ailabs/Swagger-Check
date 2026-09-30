@@ -63,9 +63,11 @@ FEDGPT_STG2_TOKEN = os.environ.get("FEDGPT_STG2_TOKEN", "")  # stg2
 FEDFLOW_TEST_FLOW_ID = os.environ.get("FEDFLOW_TEST_FLOW_ID", "212913c58069778f5f399a3f466d7ffc")  # stg2 flow "Second"
 
 # --- 高風險端點寫入測試：Helix V1 聲紋（/voices） ---
-# 需要一個真的音檔才能測，本機路徑因人而異，不寫死進 repo，用環境變數指定。
-# 沒有設定或檔案不存在就跳過這個測試（視為未設置，不是失敗）。
-HELIX_TEST_AUDIO_PATH = os.environ.get("HELIX_TEST_AUDIO_PATH", "")
+# 需要一個真的音檔才能測（Helix 聲紋與 Asura 語音相關測試共用），預設用專案根目錄 test-data/ 裡的
+# 單人英文語音；想換別的音檔再用環境變數指定。檔案不存在就跳過這幾組測試（視為未設置，不是失敗）。
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+TEST_DATA_DIR = os.path.join(PROJECT_ROOT, "test-data")
+HELIX_TEST_AUDIO_PATH = os.environ.get("HELIX_TEST_AUDIO_PATH") or os.path.join(TEST_DATA_DIR, "harvard.aac")
 
 # /enrollment 是「一個帳號只能有一組」的資源，不能用主要測試帳號測（可能已經有真實註冊）。
 # 這裡用一個獨立的、確認過從沒註冊過聲紋的專用測試帳號 token，沒有設定就跳過這個測試。

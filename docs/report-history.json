@@ -30,5 +30,36 @@
     "error": 45,
     "warning": 48,
     "info": 124
+  },
+  {
+    "generated_at": "2026-09-30 11:12:54 +0800",
+    "env": "stg2",
+    "phases": [
+      "static",
+      "live",
+      "llm"
+    ],
+    "endpoint_pass": 76,
+    "endpoint_fail": 5,
+    "endpoint_total": 81,
+    "error": 23,
+    "warning": 39,
+    "info": 80
+  },
+  {
+    "generated_at": "2026-09-30 11:41:34 +0800",
+    "env": "stg2",
+    "phases": [
+      "static",
+      "live",
+      "live_write",
+      "llm"
+    ],
+    "endpoint_pass": 63,
+    "endpoint_fail": 18,
+    "endpoint_total": 81,
+    "error": 45,
+    "warning": 48,
+    "info": 114
   }
 ]

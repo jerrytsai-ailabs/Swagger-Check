@@ -26,7 +26,7 @@ Mac／Linux 上如果 `python`/`pip` 不是 Python 3，改用 `python3`/`pip3`�
 | `FEDGPT_ACCESS_TOKEN` | 打 **dev** 環境用的 access token | live 相關階段無法執行 |
 | `FEDGPT_STG2_TOKEN` | 打 **stg2** 環境用的 access token（兩環境帳號不互通） | `test_stg2` 腳本無法執行 |
 | `FEDFLOW_TEST_FLOW_ID` | `--live-write` 測 FedFlow execute 用的 flow | 預設 stg2 上已確認無副作用的 flow "Second"（`212913c58069778f5f399a3f466d7ffc`），其他環境會跳過 |
-| `HELIX_TEST_AUDIO_PATH` | Helix 聲紋與 Asura 語音相關測試用的本機音檔 | 跳過這幾組測試 |
+| `HELIX_TEST_AUDIO_PATH` | Helix 聲紋與 Asura 語音相關測試用的音檔（要單人語音） | 使用 `test-data/harvard.aac`；檔案不存在就跳過這幾組測試 |
 | `HELIX_ENROLLMENT_TEST_TOKEN` | 測 Helix `/enrollment` 用的獨立帳號 token（一個帳號只能註冊一次，不能用主要帳號） | 跳過 |
 | `AUTH_LOGIN_TEST_USERNAME` / `AUTH_LOGIN_TEST_PASSWORD` | 測 Auth V2 login / logout 用的**次要帳號**（避免動到主要帳號的 token） | 跳過 |
 | `TEAMS_WEBHOOK_URL` | `--notify-teams` 推播（Teams → Workflows →「When a Teams webhook request is received」） | 無法推播 |
@@ -34,6 +34,8 @@ Mac／Linux 上如果 `python`/`pip` 不是 Python 3，改用 `python3`/`pip3`�
 | `REPORT_LINK_URL` | 推播卡片「開啟完整報告」的連結，建議設成 Confluence 報告頁 | 退回本機報告的檔案路徑 |
 | `CONFLUENCE_EMAIL` / `CONFLUENCE_API_TOKEN` | `--notify-confluence` 認證，**每個人用自己的**（[申請 API token](https://id.atlassian.com/manage-profile/security/api-tokens)） | 無法更新 Confluence |
 | `CONFLUENCE_REPORT_PAGE_ID` / `CONFLUENCE_SITE_URL` | 要覆寫的 Confluence 頁面（目前是 `469303303`）與站台 | 站台預設 `https://ailabstw.atlassian.net` |
+
+測試用的檔案（目前是語音測試用的 `harvard.aac`）統一放在專案根目錄的 `test-data/`。
 
 ### Token 過期怎麼辦
 
