@@ -200,7 +200,7 @@ def render_html(findings, entries, base_url):
                 "sec-live-write",
                 "Live Call — 寫入方法測試（POST/PUT/DELETE）",
                 live_write_findings,
-                note="小範圍驗證：目前涵蓋 Chat V2 對話、FAQ 問答集與 entry、Knowledge 知識庫與文件、FedFlow 執行、Helix 聲紋，不是全面涵蓋所有寫入端點。",
+                note="實際建立 → 驗證 → 修改 → 刪除測試資料（標題以 [agent-test] 開頭），涵蓋大部分公開寫入端點；尚未涵蓋的端點見 README「寫入測試尚未涵蓋的端點」。",
             )
         )
     if has_diff:
