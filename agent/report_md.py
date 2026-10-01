@@ -34,6 +34,17 @@ _PHASE_LABEL = OrderedDict(
 # responses.200 這種是狀態碼不是索引，要保留
 _INDEX_RE = re.compile(r"(?<!responses)\.\d+(?=[.\s:：\]]|$)")
 
+# 每次執行都會不同的測試資料 ID，換成固定的 <id>，不然同一個問題每次都會出現在 git diff 裡：
+# - Asset/Asura 上傳拿到的 assetKey：tmp/wazHLbY4bK31NB-26JXjT
+# - 21 字元的 nanoid（convId、knowledgeId、documentId…，有時直接出現在 path 裡）：要同時有大小寫，
+#   且含數字或 - _，避免誤傷 hallucinationScore 這類 camelCase 欄位名
+# - 32 字元的 hex（FedFlow executionId）
+_ID_RES = [
+    (re.compile(r"tmp/[A-Za-z0-9_-]+"), "tmp/<id>"),
+    (re.compile(r"(?<![A-Za-z0-9_-])(?=[A-Za-z0-9_-]*[a-z])(?=[A-Za-z0-9_-]*[A-Z])(?=[A-Za-z0-9_-]*[0-9_-])[A-Za-z0-9_-]{21}(?![A-Za-z0-9_-])"), "<id>"),
+    (re.compile(r"(?<![0-9a-f])[0-9a-f]{32}(?![0-9a-f])"), "<id>"),
+]
+
 
 def _md(value):
     """表格儲存格用：跳脫 |、把換行壓成空白。"""
@@ -47,7 +58,10 @@ def _code(value):
 
 
 def _normalize(text):
-    return _INDEX_RE.sub(".N", text or "")
+    text = _INDEX_RE.sub(".N", text or "")
+    for pattern, placeholder in _ID_RES:
+        text = pattern.sub(placeholder, text)
+    return text
 
 
 def _phases_run(findings):
