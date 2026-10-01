@@ -130,7 +130,7 @@ python run_check.py --base-url https://fedgpt-stg2-vm1.corp.ailabs.tw/swagger/do
 
 | 輸出 | 位置 | 說明 |
 |---|---|---|
-| HTML 報告 | `reports/report-<時間>.html` | 每次產生一份，細節最完整（可摺疊、深色模式）。只在本機，不進版控 |
+| HTML 報告 | `reports/FedGPT-API-Review-<環境>-yyyy-mm-dd.html` | 每次產生一份（同一天第二次起檔名加上時分秒），細節最完整（可摺疊、深色模式）。單一檔案、不含任何 token，可以直接傳給別人用瀏覽器開。只在本機，不進版控 |
 | Markdown 報告 | [docs/REPORT.md](docs/REPORT.md) + `docs/report-history.json` | 每次覆寫，**要 commit 進 git**。用 `git diff docs/REPORT.md` 看這次跟上次差在哪；內含執行歷史表。同一根因合併成一行、Info 只列數量、LLM 細項放最後（LLM 每次結果會有些浮動） |
 | Confluence | [API Review Agent — 最新報告](https://ailabstw.atlassian.net/wiki/spaces/FEDGPT/pages/469303303/API+Review+Agent) | `--notify-confluence` 整頁覆寫，網址不變；用各自的 Atlassian API token，不綁定特定人 |
 | Teams / Google Chat | 推播卡片 | 摘要 + 報告連結（`REPORT_LINK_URL`）。設了連結不會自動同步內容，要搭配 `--notify-confluence` |

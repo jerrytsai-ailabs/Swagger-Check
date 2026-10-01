@@ -69,7 +69,7 @@ from agent.live_write_test import (
     run_llm_visual_completions_test,
 )
 from agent.llm_check import run_llm_checks
-from agent.report import render_html
+from agent.report import _environment_label, render_html
 from agent.report_md import write_markdown_report
 from agent.spec_diff import SNAPSHOT_DIR_DEFAULT, run_spec_diff, spec_version
 from agent.teams_notify import build_teams_payload, post_to_teams
@@ -203,8 +203,13 @@ def main():
         print(f"寫入方法測試共 {sum(1 for f in findings if f.get('phase') == 'live_write')} 筆發現")
 
     os.makedirs(args.output_dir, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    report_path = os.path.join(args.output_dir, f"report-{timestamp}.html")
+    # 檔名 FedGPT-API-Review-<環境>-yyyy-mm-dd.html，方便直接分享；同一天跑第二次以上時加上時分秒，
+    # 不覆蓋當天前面的報告（例如先跑含 --live-write 的完整版、再跑一次快速版）
+    now = datetime.now()
+    env_label, _ = _environment_label(source_label)
+    report_path = os.path.join(args.output_dir, f"FedGPT-API-Review-{env_label}-{now:%Y-%m-%d}.html")
+    if os.path.exists(report_path):
+        report_path = os.path.join(args.output_dir, f"FedGPT-API-Review-{env_label}-{now:%Y-%m-%d-%H%M%S}.html")
     with open(report_path, "w", encoding="utf-8") as fh:
         fh.write(render_html(findings, entries, source_label))
     print(f"HTML report 已寫入：{os.path.abspath(report_path)}")

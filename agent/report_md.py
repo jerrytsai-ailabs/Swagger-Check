@@ -31,8 +31,8 @@ _PHASE_LABEL = OrderedDict(
 )
 
 # 陣列索引（conversations.0、sseEvents.3）合併成 .N，讓同一個根因的多筆發現歸成一行；
-# responses.200 這種是狀態碼不是索引，要保留
-_INDEX_RE = re.compile(r"(?<!responses)\.\d+(?=[.\s:：\]]|$)")
+# responses.200 這種是狀態碼不是索引，要保留；前面要接欄位名稱（字母），tts-general-0.0.1 這種版本號不算
+_INDEX_RE = re.compile(r"(?<!responses)(?<=[A-Za-z_])\.\d+(?=[.\s:：\]]|$)")
 
 # 每次執行都會不同的測試資料 ID，換成固定的 <id>，不然同一個問題每次都會出現在 git diff 裡：
 # - Asset/Asura 上傳拿到的 assetKey：tmp/wazHLbY4bK31NB-26JXjT
@@ -148,7 +148,7 @@ def render_markdown(findings, entries, base_url, history):
     lines = [
         f"# Public Swagger 稽核報告（{env_label}）",
         "",
-        "> 這份檔案由 `run_check.py` 每次執行自動覆寫，請勿手動編輯。完整細節請看同一次執行產生的 `reports/report-*.html`。",
+        "> 這份檔案由 `run_check.py` 每次執行自動覆寫，請勿手動編輯。完整細節請看同一次執行產生的 `reports/FedGPT-API-Review-*.html`。",
         "",
         f"- 最後更新：{summary['generated_at']}",
         f"- 來源：{derive_swagger_ui_url(base_url)}",
