@@ -14,6 +14,7 @@
 """
 
 import copy
+import re
 
 import requests
 from jsonschema import Draft202012Validator
@@ -116,6 +117,33 @@ def _documented_statuses(op):
     return set((op.get("responses") or {}).keys())
 
 
+_JWT_RE = re.compile(r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+")
+
+
+def _response_excerpt(resp, limit=300):
+    """給 finding 訊息用的回應摘要：前 limit 個字元（換行壓成空白）＋ X-Request-Id。
+
+    未宣告的狀態碼最需要知道「後端到底回了什麼」才查得下去（哪個 service、哪個 reason），
+    光有狀態碼 RD 沒辦法追。HTML（例如打到前端首頁）和音訊等二進位內容不貼原文；
+    報告會分享出去，看起來像 JWT 的 token 一律遮掉。
+    """
+    if resp is None:
+        return ""
+    content_type = (resp.headers.get("Content-Type") or "").lower()
+    if "html" in content_type:
+        body = "（HTML 頁面，內容省略）"
+    elif content_type.startswith(("audio/", "video/", "image/", "application/octet-stream")):
+        body = f"（{content_type.split(';')[0]}，{len(resp.content)} bytes，內容省略）"
+    else:
+        body = " ".join((resp.text or "").split())
+        body = _JWT_RE.sub("<token>", body)
+        if len(body) > limit:
+            body = body[:limit] + "…"
+        body = body or "（空的回應內容）"
+    request_id = resp.headers.get("X-Request-Id")
+    return f"回應內容：{body}" + (f"（X-Request-Id: {request_id}）" if request_id else "")
+
+
 def _check_response(entry, path, op, status_code, resp, findings):
     file, group = entry["filename"], entry["group"]
     documented = _documented_statuses(op)
@@ -128,7 +156,7 @@ def _check_response(entry, path, op, status_code, resp, findings):
                 "error",
                 file,
                 group,
-                f"實際回傳 {status_str}，但 spec 裡這支 endpoint 沒有宣告這個狀態碼（宣告的有：{sorted(documented)}）",
+                f"實際回傳 {status_str}，但 spec 裡這支 endpoint 沒有宣告這個狀態碼（宣告的有：{sorted(documented)}）。{_response_excerpt(resp)}",
                 path=path,
                 method="GET",
             )

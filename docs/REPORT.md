@@ -2,22 +2,23 @@
 
 > 這份檔案由 `run_check.py` 每次執行自動覆寫，請勿手動編輯。完整細節請看同一次執行產生的 `reports/FedGPT-API-Review-*.html`。
 
-- 最後更新：2026-10-01 10:02:16 +0800
+- 最後更新：2026-10-01 18:13:08 +0800
 - 來源：https://fedgpt-stg2-vm1.corp.ailabs.tw/swagger/
 - 這次跑的階段：靜態比對、Live GET、Live 寫入、LLM 審查
 
 | 整體結果 | Pass | Fail | Endpoint 總數 | Pass 率 |
 |---|---|---|---|---|
-| **FAIL** | 64 | 17 | 81 | 79.0% |
+| **FAIL** | 63 | 18 | 81 | 77.8% |
 
 | 總發現數 | Error | Warning | Info | 無發現的分頁 |
 |---|---|---|---|---|
-| 209 | 48 | 47 | 114 | 0/10 |
+| 210 | 49 | 47 | 114 | 0/10 |
 
 ## 執行歷史
 
 | 時間 | 環境 | live-write | Pass 率 | Pass/總數 | Error | Warning | Info |
 |---|---|---|---|---|---|---|---|
+| 2026-10-01 18:13:08 +0800 | stg2 | ✓ | 77.8% | 63/81 | 49 | 47 | 114 |
 | 2026-10-01 10:02:16 +0800 | stg2 | ✓ | 79.0% | 64/81 | 48 | 47 | 114 |
 | 2026-10-01 09:37:51 +0800 | stg2 | ✓ | 77.8% | 63/81 | 49 | 47 | 114 |
 | 2026-09-30 11:41:34 +0800 | stg2 | ✓ | 77.8% | 63/81 | 45 | 48 | 114 |
@@ -37,22 +38,25 @@
 | Auth V2 | `auth-v2.yaml` | 12 個發現 |
 | Chat V2 | `chat-v2.yaml` | 64 個發現 |
 | FAQ V1 | `faq-v1.yaml` | 14 個發現 |
-| FedFlow V1 | `fedflow-v1.yaml` | 40 個發現 |
+| FedFlow V1 | `fedflow-v1.yaml` | 41 個發現 |
 | Helix V1 | `helix-v1.yaml` | 12 個發現 |
 | Knowledge V3 | `knowledge-v3.yaml` | 17 個發現 |
 | LLM V1 | `llm-v1.yaml` | 17 個發現 |
 
-## Error（41 筆，依根因合併）
+## Error（42 筆，依根因合併）
 
 | 階段 | 分頁 | Endpoint | 位置 | 問題 | 規則 | 筆數 |
 |---|---|---|---|---|---|---|
 | Live GET | Chat V2 | GET `/api/public/chat/v2/conversations` | `responses.200.conversations.N` | 實際回應在 conversations.N 不符合 spec 宣告的 schema：'disabled' is a required property | `response_schema_mismatch` | 5 |
 | Live GET | Chat V2 | GET `/api/public/chat/v2/faqs` | `responses.200.faqs.N` | 實際回應在 faqs.N 不符合 spec 宣告的 schema：'description' is a required property | `response_schema_mismatch` | 5 |
 | Live GET | Chat V2 | GET `/api/public/chat/v2/conversations/{convId}` | `responses.200.conversation` | 實際回應在 conversation 不符合 spec 宣告的 schema：'disabled' is a required property | `response_schema_mismatch` | 1 |
-| Live GET | Chat V2 | GET `/api/public/chat/v2/conversations/{convId}/messages` | `responses.200.flowMessages.items.N.sseEvents.N.content.role` | 實際回應在 flowMessages.items.N.sseEvents.N.content.role 不符合 spec 宣告的 schema：'' is not one of ['user', 'assistant', 'tool', 'system'] | `response_schema_mismatch` | 5 |
+| Live GET | Chat V2 | GET `/api/public/chat/v2/conversations/{convId}/messages` | `responses.200.messages.N.guardian` | 實際回應在 messages.N.guardian 不符合 spec 宣告的 schema：'biasScore' is a required property | `response_schema_mismatch` | 2 |
+| Live GET | Chat V2 | GET `/api/public/chat/v2/conversations/{convId}/messages` | `responses.200.messages.N.guardian` | 實際回應在 messages.N.guardian 不符合 spec 宣告的 schema：'hallucinationScore' is a required property | `response_schema_mismatch` | 2 |
+| Live GET | Chat V2 | GET `/api/public/chat/v2/conversations/{convId}/messages` | `responses.200.messages.N.humanInLoop` | 實際回應在 messages.N.humanInLoop 不符合 spec 宣告的 schema：None is not of type 'object' | `response_schema_mismatch` | 1 |
 | Live 寫入 | Chat V2 | GET `/api/public/chat/v2/conversations/{convId}` | `conversation` | 實際回應在 conversation 不符合 spec 宣告的 schema：'disabled' is a required property | `response_schema_mismatch` | 1 |
-| Live 寫入 | Knowledge V3 | DELETE `/api/public/knowledge/v3/knowledges/{knowledgeId}` | — | 實際回傳 423，但 spec 裡這支 endpoint 沒有宣告這個狀態碼（宣告的有：['200', '403', '404']） | `undocumented_status_code` | 1 |
-| Live 寫入 | Helix V1 | POST `/api/public/helix/v1/voices` | — | 實際回傳 502，但 spec 裡這支 endpoint 沒有宣告這個狀態碼（宣告的有：['200', '400']） | `undocumented_status_code` | 1 |
+| Live 寫入 | Knowledge V3 | DELETE `/api/public/knowledge/v3/knowledges/{knowledgeId}` | — | 實際回傳 423，但 spec 裡這支 endpoint 沒有宣告這個狀態碼（宣告的有：['200', '403', '404']）。回應內容：{"service":"grpc-knowledge","reason":"data.locked","message":"cannot delete kb with 1 documents; delete them first"}（X-Request-Id: <id>） | `undocumented_status_code` | 1 |
+| Live 寫入 | FedFlow V1 | GET `/api/public/fedflow/v1/executions/{executionId}/result` | `state` | 實際回應在 state 不符合 spec 宣告的 schema：'PENDING' is not one of ['INPROGRESS', 'FINISHED', 'ERROR', 'TERMINATED', 'TIMEOUT', 'STOPPED'] | `response_schema_mismatch` | 1 |
+| Live 寫入 | Helix V1 | POST `/api/public/helix/v1/voices` | — | 實際回傳 502，但 spec 裡這支 endpoint 沒有宣告這個狀態碼（宣告的有：['200', '400']）。回應內容：{"service":"","reason":"","message":"502: {\"detail\":{\"error\":\"AUDIO_FETCH_FAILED\",\"message\":\"audio_uri must be an absolute path or http(s) URL, got: 'tmp/<id>'\"}}"}（X-Request-Id: <id>） | `undocumented_status_code` | 1 |
 | Live 寫入 | Chat V2 | POST `/api/public/chat/v2/chat/normal` | `messages.N.guardian` | 實際回應在 messages.N.guardian 不符合 spec 宣告的 schema：'biasScore' is a required property | `response_schema_mismatch` | 1 |
 | Live 寫入 | Chat V2 | POST `/api/public/chat/v2/chat/normal` | `messages.N.guardian` | 實際回應在 messages.N.guardian 不符合 spec 宣告的 schema：'hallucinationScore' is a required property | `response_schema_mismatch` | 1 |
 | Live 寫入 | Chat V2 | POST `/api/public/chat/v2/chat/normal` | `messages.N.humanInLoop` | 實際回應在 messages.N.humanInLoop 不符合 spec 宣告的 schema：None is not of type 'object' | `response_schema_mismatch` | 1 |
@@ -65,16 +69,16 @@
 | Live 寫入 | Chat V2 | POST `/api/public/chat/v2/chat/faq` | `messages.N.guardian` | 實際回應在 messages.N.guardian 不符合 spec 宣告的 schema：'biasScore' is a required property | `response_schema_mismatch` | 1 |
 | Live 寫入 | Chat V2 | POST `/api/public/chat/v2/chat/faq` | `messages.N.guardian` | 實際回應在 messages.N.guardian 不符合 spec 宣告的 schema：'hallucinationScore' is a required property | `response_schema_mismatch` | 1 |
 | Live 寫入 | Chat V2 | POST `/api/public/chat/v2/chat/faq` | `messages.N.humanInLoop` | 實際回應在 messages.N.humanInLoop 不符合 spec 宣告的 schema：None is not of type 'object' | `response_schema_mismatch` | 1 |
-| Live 寫入 | Chat V2 | POST `/api/public/chat/v2/chat/tabular` | — | 實際回傳 423，但 spec 裡這支 endpoint 沒有宣告這個狀態碼（宣告的有：['200', '400', '403', '404', '410']） | `undocumented_status_code` | 1 |
+| Live 寫入 | Chat V2 | POST `/api/public/chat/v2/chat/tabular` | — | 實際回傳 423，但 spec 裡這支 endpoint 沒有宣告這個狀態碼（宣告的有：['200', '400', '403', '404', '410']）。回應內容：{"service":"grpc-knowledge","reason":"data.locked","message":"tabular not ready for query"}（X-Request-Id: <id>） | `undocumented_status_code` | 1 |
 | Live 寫入 | Chat V2 | POST `/api/public/chat/v2/chat/tabular` | — | POST 送訊息（tabular）沒有回 200（實際 423），中止測試（仍會清理臨時資源） | `live_write_aborted` | 1 |
-| Live 寫入 | Asura V1 | POST `/api/public/asura/v1/transcriptions` | — | 實際回傳 500，但 spec 裡這支 endpoint 沒有宣告這個狀態碼（宣告的有：['200', '400']） | `undocumented_status_code` | 1 |
-| Live 寫入 | Asura V1 | POST `/api/public/asura/v1/transcriptions` | — | POST 建立轉錄工作沒有回 200（實際 500），中止測試 | `live_write_aborted` | 1 |
+| Live 寫入 | Asura V1 | POST `/api/public/asura/v1/transcriptions` | — | 實際回傳 500，但 spec 裡這支 endpoint 沒有宣告這個狀態碼（宣告的有：['200', '400']）。回應內容：{"service":"http-api","reason":"inferno.get-model.failed","message":"Received non-OK response, status_code: 404"}（X-Request-Id: <id>） | `undocumented_status_code` | 1 |
+| Live 寫入 | Asura V1 | POST `/api/public/asura/v1/transcriptions` | — | POST 建立轉錄工作沒有回 200（實際 500）。回應內容：{"service":"http-api","reason":"inferno.get-model.failed","message":"Received non-OK response, status_code: 404"}（X-Request-Id: <id>），中止測試 | `live_write_aborted` | 1 |
 | Live 寫入 | Chat V2 | POST `/api/public/chat/v2/chat/tabular:stream` | — | 串流中途收到 event: error：{'service': 'grpc-knowledge', 'reason': 'data.locked', 'message': 'tabular not ready for query'} | `live_write_aborted` | 1 |
-| Live 寫入 | Helix V1 | POST `/api/public/helix/v1/enrollment` | — | 實際回傳 500，但 spec 裡這支 endpoint 沒有宣告這個狀態碼（宣告的有：['200', '400', '409']） | `undocumented_status_code` | 1 |
-| Live 寫入 | Helix V1 | POST `/api/public/helix/v1/enrollment` | — | POST 註冊聲紋沒有回 200（實際 500）：{"service":"","reason":"","message":"500: Internal Server Error"} ，中止測試 | `live_write_aborted` | 1 |
-| Live 寫入 | Asura V1 | POST `/api/public/asura/v1/speeches:zero-shot` | — | 實際回傳 500，但 spec 裡這支 endpoint 沒有宣告這個狀態碼（宣告的有：['200', '400', '404']） | `undocumented_status_code` | 1 |
-| Live 寫入 | Asura V1 | POST `/api/public/asura/v1/speeches:zero-shot` | — | POST 零樣本語音克隆沒有回 200（實際 500）：{"service":"http-gateway","reason":"data.unhandled","message":"unexpected status code: 400"} ，中止測試 | `live_write_aborted` | 1 |
-| Live 寫入 | Auth V2 | POST `/api/public/auth/v2/logout` | — | 實際回傳 401，但 spec 裡這支 endpoint 沒有宣告這個狀態碼（宣告的有：['200']） | `undocumented_status_code` | 1 |
+| Live 寫入 | Helix V1 | POST `/api/public/helix/v1/enrollment` | — | 實際回傳 500，但 spec 裡這支 endpoint 沒有宣告這個狀態碼（宣告的有：['200', '400', '409']）。回應內容：{"service":"","reason":"","message":"500: Internal Server Error"}（X-Request-Id: <id>） | `undocumented_status_code` | 1 |
+| Live 寫入 | Helix V1 | POST `/api/public/helix/v1/enrollment` | — | POST 註冊聲紋沒有回 200（實際 500）。回應內容：{"service":"","reason":"","message":"500: Internal Server Error"}（X-Request-Id: <id>），中止測試 | `live_write_aborted` | 1 |
+| Live 寫入 | Asura V1 | POST `/api/public/asura/v1/speeches:zero-shot` | — | 實際回傳 500，但 spec 裡這支 endpoint 沒有宣告這個狀態碼（宣告的有：['200', '400', '404']）。回應內容：{"service":"http-gateway","reason":"data.unhandled","message":"unexpected status code: 400"}（X-Request-Id: <id>） | `undocumented_status_code` | 1 |
+| Live 寫入 | Asura V1 | POST `/api/public/asura/v1/speeches:zero-shot` | — | POST 零樣本語音克隆沒有回 200（實際 500）。回應內容：{"service":"http-gateway","reason":"data.unhandled","message":"unexpected status code: 400"}（X-Request-Id: <id>），中止測試 | `live_write_aborted` | 1 |
+| Live 寫入 | Auth V2 | POST `/api/public/auth/v2/logout` | — | 實際回傳 401，但 spec 裡這支 endpoint 沒有宣告這個狀態碼（宣告的有：['200']）。回應內容：{"service":"grpc-auth","reason":"auth.invalid-auth","message":"token is revoked"}（X-Request-Id: <id>） | `undocumented_status_code` | 1 |
 
 ## Warning（47 筆，依根因合併）
 

@@ -29,7 +29,7 @@ import uuid
 import requests
 from jsonschema import Draft202012Validator
 
-from .live_call import _deref_schema, _documented_statuses
+from .live_call import _deref_schema, _documented_statuses, _response_excerpt
 
 TEST_TITLE = "[agent-test] live-call POST/PUT/DELETE 驗證"
 TEST_TITLE_UPDATED = TEST_TITLE + " - updated"
@@ -78,7 +78,7 @@ def _check_status_and_schema(op, resp, findings, file, group, path, method):
                 "error",
                 file,
                 group,
-                f"實際回傳 {status_str}，但 spec 裡這支 endpoint 沒有宣告這個狀態碼（宣告的有：{sorted(documented)}）",
+                f"實際回傳 {status_str}，但 spec 裡這支 endpoint 沒有宣告這個狀態碼（宣告的有：{sorted(documented)}）。{_response_excerpt(resp)}",
                 path=path,
                 method=method,
             )
@@ -216,7 +216,7 @@ def _asset_v2_presign_and_upload(
         upload_resp = requests.post(f"{origin}/asset", data=form_data, files={"file": (filename, content, content_type)}, timeout=timeout)
         if not upload_resp.ok:
             findings.append(
-                _finding("live_write_aborted", "error", presign_filename, presign_group, f"實際上傳檔案到 storage 失敗（{upload_resp.status_code}）：{upload_resp.text[:300]}", path="/asset", method="POST")
+                _finding("live_write_aborted", "error", presign_filename, presign_group, f"實際上傳檔案到 storage 失敗（{upload_resp.status_code}）。{_response_excerpt(upload_resp)}", path="/asset", method="POST")
             )
             return None
     except requests.RequestException as exc:
@@ -822,7 +822,7 @@ def run_knowledge_document_crud_test(entries, api_base_url, token, timeout=30):
                         "error",
                         asset_filename,
                         asset_group,
-                        f"實際上傳檔案到 storage 失敗（{upload_resp.status_code}）：{upload_resp.text[:300]}，中止文件寫入測試",
+                        f"實際上傳檔案到 storage 失敗（{upload_resp.status_code}）。{_response_excerpt(upload_resp)}，中止文件寫入測試",
                         path="/asset",
                         method="POST",
                     )
@@ -1247,7 +1247,7 @@ def run_helix_voice_crud_test(entries, api_base_url, token, timeout=60):
                         "error",
                         asset_filename,
                         asset_group,
-                        f"實際上傳音檔到 storage 失敗（{upload_resp.status_code}）：{upload_resp.text[:300]}，中止測試",
+                        f"實際上傳音檔到 storage 失敗（{upload_resp.status_code}）。{_response_excerpt(upload_resp)}，中止測試",
                         path="/asset",
                         method="POST",
                     )
@@ -2321,7 +2321,7 @@ def run_asura_transcription_test(entries, api_base_url, token, timeout=60):
 
     ok = _check_status_and_schema(op_of(transcriptions_path, "post"), resp, findings, filename, group, transcriptions_path, "post")
     if not ok or resp.status_code != 200:
-        findings.append(_finding("live_write_aborted", "error", filename, group, f"POST 建立轉錄工作沒有回 200（實際 {resp.status_code}），中止測試", path=transcriptions_path, method="POST"))
+        findings.append(_finding("live_write_aborted", "error", filename, group, f"POST 建立轉錄工作沒有回 200（實際 {resp.status_code}）。{_response_excerpt(resp)}，中止測試", path=transcriptions_path, method="POST"))
         return findings
 
     try:
@@ -2960,7 +2960,7 @@ def run_helix_enrollment_test(entries, api_base_url, token, timeout=60):
         except ValueError:
             pass
         findings.append(
-            _finding("live_write_aborted", "error", filename, group, f"POST 註冊聲紋沒有回 200（實際 {resp.status_code}）：{resp.text[:300]}，中止測試", path=enrollment_path, method="POST")
+            _finding("live_write_aborted", "error", filename, group, f"POST 註冊聲紋沒有回 200（實際 {resp.status_code}）。{_response_excerpt(resp)}，中止測試", path=enrollment_path, method="POST")
         )
         return findings
 
@@ -3164,7 +3164,7 @@ def run_asura_speech_zero_shot_test(entries, api_base_url, token, timeout=60):
                     method="POST",
                 )
             )
-        findings.append(_finding("live_write_aborted", "error", filename, group, f"POST 零樣本語音克隆沒有回 200（實際 {resp.status_code}）：{resp.text[:300]}，中止測試", path=zero_shot_path, method="POST"))
+        findings.append(_finding("live_write_aborted", "error", filename, group, f"POST 零樣本語音克隆沒有回 200（實際 {resp.status_code}）。{_response_excerpt(resp)}，中止測試", path=zero_shot_path, method="POST"))
         return findings
 
     content_type_resp = resp.headers.get("Content-Type", "")
@@ -3281,7 +3281,7 @@ def run_helix_voice_search_by_audio_test(entries, api_base_url, token, timeout=1
                 "error",
                 filename,
                 group,
-                f"POST voices:searchByAudio 沒有回 200（實際 {resp.status_code}）：{resp.text[:300]}，中止測試（仍會清理臨時聲紋）",
+                f"POST voices:searchByAudio 沒有回 200（實際 {resp.status_code}）。{_response_excerpt(resp)}，中止測試（仍會清理臨時聲紋）",
                 path=search_path,
                 method="POST",
             )
