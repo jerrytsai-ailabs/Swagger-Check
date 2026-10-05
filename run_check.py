@@ -11,7 +11,7 @@
     python run_check.py --no-diff           # 不跟上次執行的結果比對（預設會比對）
     python run_check.py --notify-teams      # 把摘要推到 Microsoft Teams（需要 TEAMS_WEBHOOK_URL）
     python run_check.py --llm-check         # 額外用 LLM 審查 description 寫得清不清楚、有沒有矛盾
-    python run_check.py --live-write        # 額外測 POST/PUT/DELETE，含 FedFlow 執行（大多會自動清除，FedFlow execute 例外、無法復原，只在 stg2 測）
+    python run_check.py --live-write        # 額外測 POST/PUT/DELETE，含 FedFlow 執行（大多會自動清除，FedFlow execute 例外、無法復原，只在 stg2-vm1 測）
 """
 
 import argparse
@@ -110,7 +110,7 @@ def main():
         "--live-write",
         action="store_true",
         help="額外測 POST/PUT/DELETE：Chat V2 對話、FAQ V1 問答集、Knowledge V3 知識庫各跑一輪建立/驗證/更新/驗證/刪除/驗證（測完自動清除），"
-        "以及 FedFlow V1 執行一個事先確認無副作用的 flow 並輪詢結果（無法復原、只在 stg2 有可用的測試 flow）",
+        "以及 FedFlow V1 執行一個事先確認無副作用的 flow 並輪詢結果（無法復原、只在 stg2-vm1 有可用的測試 flow）",
     )
     args = parser.parse_args()
 

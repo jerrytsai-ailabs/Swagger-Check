@@ -53,7 +53,7 @@ def _save_snapshot(snapshot_dir, filename, raw_text):
 def spec_version(entries):
     """從這次抓到的 spec 找目前的版本號（每份檔案的 info.version），拿來決定快照要存進哪個版本資料夾。
 
-    stg2 等有掛版號的環境會回真的版號（如 v3.12）；dev 環境固定回 "latest"（跟得上最新開發進度，
+    stg2-vm1 等有掛版號的環境會回真的版號（如 v3.12）；dev 環境固定回 "latest"（跟得上最新開發進度，
     本來就沒有版號概念）。全部檔案都抓不到 spec 時退回 UNVERSIONED_LABEL，快照還是能正常運作，
     只是不會有意義的版本分類。
     """

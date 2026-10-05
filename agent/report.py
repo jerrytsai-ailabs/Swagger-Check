@@ -67,14 +67,18 @@ def build_summary(findings, entries):
 
 
 def _environment_label(base_url):
+    """從主機名稱推導環境名稱：fedgpt-stg2-vm1.corp... -> stg2-vm1、fedgpt-dev.corp... -> dev。
+
+    直接用主機名稱，不寫死成 stg2 / dev，因為同一個環境可能有多台機器（stg2-vm1、stg2-vm2…），
+    報告與推播要分得出是哪一台。
+    """
     host = re.sub(r"^https?://", "", base_url or "").split("/")[0]
-    if "stg2" in host:
-        return "stg2", host
-    if "dev" in host:
-        return "dev", host
     if host.startswith("local"):
         return "local", host
-    return host.split(".")[0] if host else "unknown", host
+    name = host.split(".")[0].split(":")[0]
+    if name.startswith("fedgpt-"):
+        name = name[len("fedgpt-"):]
+    return name or "unknown", host
 
 
 def _severity_mark(sev):

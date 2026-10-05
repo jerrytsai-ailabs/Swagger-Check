@@ -1,7 +1,7 @@
 [
   {
     "generated_at": "2026-09-29 11:43:59 +0800",
-    "env": "stg2",
+    "env": "stg2-vm1",
     "phases": [
       "static",
       "live",
@@ -16,7 +16,7 @@
   },
   {
     "generated_at": "2026-09-29 15:06:44 +0800",
-    "env": "stg2",
+    "env": "stg2-vm1",
     "phases": [
       "static",
       "live",
@@ -33,7 +33,7 @@
   },
   {
     "generated_at": "2026-09-30 11:12:54 +0800",
-    "env": "stg2",
+    "env": "stg2-vm1",
     "phases": [
       "static",
       "live",
@@ -48,7 +48,7 @@
   },
   {
     "generated_at": "2026-09-30 11:41:34 +0800",
-    "env": "stg2",
+    "env": "stg2-vm1",
     "phases": [
       "static",
       "live",
@@ -64,7 +64,7 @@
   },
   {
     "generated_at": "2026-10-01 09:37:51 +0800",
-    "env": "stg2",
+    "env": "stg2-vm1",
     "phases": [
       "static",
       "live",
@@ -80,7 +80,7 @@
   },
   {
     "generated_at": "2026-10-01 10:02:16 +0800",
-    "env": "stg2",
+    "env": "stg2-vm1",
     "phases": [
       "static",
       "live",
@@ -96,7 +96,7 @@
   },
   {
     "generated_at": "2026-10-01 18:13:08 +0800",
-    "env": "stg2",
+    "env": "stg2-vm1",
     "phases": [
       "static",
       "live",

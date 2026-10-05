@@ -1,4 +1,4 @@
-# Public Swagger 稽核報告（stg2）
+# Public Swagger 稽核報告（stg2-vm1）
 
 > 這份檔案由 `run_check.py` 每次執行自動覆寫，請勿手動編輯。完整細節請看同一次執行產生的 `reports/FedGPT-API-Review-*.html`。
 
@@ -18,13 +18,13 @@
 
 | 時間 | 環境 | live-write | Pass 率 | Pass/總數 | Error | Warning | Info |
 |---|---|---|---|---|---|---|---|
-| 2026-10-01 18:13:08 +0800 | stg2 | ✓ | 77.8% | 63/81 | 49 | 47 | 114 |
-| 2026-10-01 10:02:16 +0800 | stg2 | ✓ | 79.0% | 64/81 | 48 | 47 | 114 |
-| 2026-10-01 09:37:51 +0800 | stg2 | ✓ | 77.8% | 63/81 | 49 | 47 | 114 |
-| 2026-09-30 11:41:34 +0800 | stg2 | ✓ | 77.8% | 63/81 | 45 | 48 | 114 |
-| 2026-09-30 11:12:54 +0800 | stg2 | — | 93.8% | 76/81 | 23 | 39 | 80 |
-| 2026-09-29 15:06:44 +0800 | stg2 | ✓ | 77.8% | 63/81 | 45 | 48 | 124 |
-| 2026-09-29 11:43:59 +0800 | stg2 | — | 93.8% | 76/81 | 19 | 40 | 80 |
+| 2026-10-01 18:13:08 +0800 | stg2-vm1 | ✓ | 77.8% | 63/81 | 49 | 47 | 114 |
+| 2026-10-01 10:02:16 +0800 | stg2-vm1 | ✓ | 79.0% | 64/81 | 48 | 47 | 114 |
+| 2026-10-01 09:37:51 +0800 | stg2-vm1 | ✓ | 77.8% | 63/81 | 49 | 47 | 114 |
+| 2026-09-30 11:41:34 +0800 | stg2-vm1 | ✓ | 77.8% | 63/81 | 45 | 48 | 114 |
+| 2026-09-30 11:12:54 +0800 | stg2-vm1 | — | 93.8% | 76/81 | 23 | 39 | 80 |
+| 2026-09-29 15:06:44 +0800 | stg2-vm1 | ✓ | 77.8% | 63/81 | 45 | 48 | 124 |
+| 2026-09-29 11:43:59 +0800 | stg2-vm1 | — | 93.8% | 76/81 | 19 | 40 | 80 |
 
 ## 受檢規格
 
@@ -125,7 +125,7 @@
 | 靜態比對 | SSE 串流 | GET `/chat/v2/chat/agent/{convId}/stream` | — | SSE 說明文件把 `GET /chat/v2/chat/agent/{convId}/stream`（分頁：Flowise V3）列為串流端點，但在該分頁的 spec 裡找不到這支端點，可能已改名、搬家，或分頁本身沒有被抓取，文件需要更新 | `sse_doc_endpoint_not_found` | 1 |
 | Live 寫入 | Knowledge V3 | DELETE `/api/public/knowledge/v3/knowledges/{knowledgeId}` | — | spec 對 DELETE /knowledges/{knowledgeId} 的描述寫「⚠️ 底下的文件會一起消失，而且無法復原」，但實測在文件仍存在時呼叫，回應是 423（非 200），代表知識庫必須先清空文件才能刪除——文件描述的行為與實際行為不一致，建議修正文件說明或修正實作其中一邊 | `spec_description_mismatch` | 1 |
 | Live 寫入 | Helix V1 | POST `/api/public/helix/v1/voices` | — | spec 建議『Asset V2 上傳後把網址填進來』作為 audioUris，但直接把 assetKey（tmp/<id>）當成 audioUris 送出，實際回應是 502——代表這兩支 API 之間怎麼銜接，文件沒有講清楚：assetKey 不能（或至少不是能直接這樣）當 audioUris 用 | `spec_description_mismatch` | 1 |
-| Live 寫入 | Asura V1 | POST `/api/public/asura/v1/speeches:stream` | — | SpeechModelConfig.model 的 spec 範例值 'tts-general-0.0.1' 在 stg2 實測不存在（後端查模型收到 404，reason=inferno.get-model.failed），且 spec 沒有提供任何端點可查詢這個部署實際支援的 TTS 模型名稱清單（不像 Chat V2 有 GET /models）——正確版本（tts-general-1.3.3）只能問熟悉部署的人才拿得到 | `spec_description_mismatch` | 1 |
+| Live 寫入 | Asura V1 | POST `/api/public/asura/v1/speeches:stream` | — | SpeechModelConfig.model 的 spec 範例值 'tts-general-0.0.1' 在 stg2-vm1 實測不存在（後端查模型收到 404，reason=inferno.get-model.failed），且 spec 沒有提供任何端點可查詢這個部署實際支援的 TTS 模型名稱清單（不像 Chat V2 有 GET /models）——正確版本（tts-general-1.3.3）只能問熟悉部署的人才拿得到 | `spec_description_mismatch` | 1 |
 | Live 寫入 | Asura V1 | POST `/api/public/asura/v1/speeches:stream` | — | spec 宣告 SpeechInput.audioConfig 是選填（required 只列 modelConfig），但不帶它實際回應是 400：Key: 'createRequest.AudioConfig' Error:Field validation for 'AudioConfig' failed on the 'required' tag——代表伺服器端其實把它當必填 | `spec_description_mismatch` | 1 |
 | Live 寫入 | Chat V2 | GET `/api/public/chat/v2/tabulars` | — | GET /chat/v2/tabulars 回傳的 Tabular schema（tabularId/name/description）沒有任何欄位可以判斷資源是否已就緒可查詢；實測發現部分既有 tabular 會在 chat/tabular 回 423 data.locked（'tabular not ready for query'），但這個狀態碼完全沒有寫進 chat/tabular 的 spec 文件，也無法事先得知 | `spec_description_mismatch` | 2 |
 | Live 寫入 | Asura V1 | POST `/api/public/asura/v1/speeches:zero-shot` | — | spec 的 ZeroShotSpeechInput.input 只把 text 標成必填，promptVoiceUrl/promptVoiceAssetKey 兩個都是選填，但兩個都不帶實際回應是 400：failed to validate request; validation error: key: value length must be at least 1 characters——代表伺服器端其實兩者擇一是必填 | `spec_description_mismatch` | 1 |

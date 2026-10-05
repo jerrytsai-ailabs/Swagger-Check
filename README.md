@@ -24,8 +24,8 @@ Mac／Linux 上如果 `python`/`pip` 不是 Python 3，改用 `python3`/`pip3`�
 | 變數 | 用途 | 沒設定時 |
 |---|---|---|
 | `FEDGPT_ACCESS_TOKEN` | 打 **dev** 環境用的 access token | live 相關階段無法執行 |
-| `FEDGPT_STG2_TOKEN` | 打 **stg2** 環境用的 access token（兩環境帳號不互通） | `test_stg2` 腳本無法執行 |
-| `FEDFLOW_TEST_FLOW_ID` | `--live-write` 測 FedFlow execute 用的 flow | 預設 stg2 上已確認無副作用的 flow "Second"（`212913c58069778f5f399a3f466d7ffc`），其他環境會跳過 |
+| `FEDGPT_STG2_TOKEN` | 打 **stg2-vm1** 環境用的 access token（兩環境帳號不互通） | `test_stg2` 腳本無法執行 |
+| `FEDFLOW_TEST_FLOW_ID` | `--live-write` 測 FedFlow execute 用的 flow | 預設 stg2-vm1 上已確認無副作用的 flow "Second"（`212913c58069778f5f399a3f466d7ffc`），其他環境會跳過 |
 | `HELIX_TEST_AUDIO_PATH` | Helix 聲紋與 Asura 語音相關測試用的音檔（要單人語音） | 使用 `test-data/harvard.aac`；檔案不存在就跳過這幾組測試 |
 | `HELIX_ENROLLMENT_TEST_TOKEN` | 測 Helix `/enrollment` 用的獨立帳號 token（一個帳號只能註冊一次，不能用主要帳號） | 跳過 |
 | `AUTH_LOGIN_TEST_USERNAME` / `AUTH_LOGIN_TEST_PASSWORD` | 測 Auth V2 login / logout 用的**次要帳號**（避免動到主要帳號的 token） | 跳過 |
@@ -52,13 +52,13 @@ dev 環境把網域換成 `fedgpt-dev.corp.ailabs.tw`；LDAP 帳號改打 `/api/
 
 ## 常用指令
 
-**stg2 用包好的腳本**（固定帶 `--live --llm-check`，自動吃 `FEDGPT_STG2_TOKEN`，後面接的參數會轉給 `run_check.py`）：
+**stg2-vm1 用包好的腳本**（固定帶 `--live --llm-check`，自動吃 `FEDGPT_STG2_TOKEN`，後面接的參數會轉給 `run_check.py`）：
 
 ```powershell
 # Windows
 .\test_stg2.ps1                              # 日常檢查：不動任何資料，但會跑 LLM 審查（有呼叫成本）
 .\test_stg2.ps1 --notify-teams               # 同上 + 推 Teams
-.\test_stg2.ps1 --live-write --notify-teams  # 完整驗證：含寫入測試（會動到 stg2 資料，見下方注意事項）
+.\test_stg2.ps1 --live-write --notify-teams  # 完整驗證：含寫入測試（會動到 stg2-vm1 資料，見下方注意事項）
 ```
 ```bash
 # Mac / Linux（第一次先 chmod +x test_stg2.sh）
@@ -69,7 +69,7 @@ dev 環境把網域換成 `fedgpt-dev.corp.ailabs.tw`；LDAP 帳號改打 `/api/
 
 ```bash
 python run_check.py                                   # 只做靜態檢查 + spec diff（不需要 token），預設打 dev
-python run_check.py --base-url https://fedgpt-stg2-vm1.corp.ailabs.tw/swagger/docs --token <stg2 token> --live --llm-check
+python run_check.py --base-url https://fedgpt-stg2-vm1.corp.ailabs.tw/swagger/docs --token <stg2-vm1 token> --live --llm-check
 ```
 
 | 旗標 | 作用 |
@@ -112,7 +112,7 @@ python run_check.py --base-url https://fedgpt-stg2-vm1.corp.ailabs.tw/swagger/do
 
 ### Spec diff 的比對基準
 
-快照依 spec 的 `info.version` 分資料夾存放（`spec_snapshots/<version>/`）。目前 dev 回 `latest`、stg2 回 `v3.13`。
+快照依 spec 的 `info.version` 分資料夾存放（`spec_snapshots/<version>/`）。目前 dev 回 `latest`、stg2-vm1 回 `v3.13`。
 - 該版本已有快照 → 跟它比，比完用這次的內容覆蓋，當下次的基準。
 - 第一次看到這個版本 → 自動改跟本機版號最接近的舊版本比（報告會出現 `diff_baseline_cross_version` 提示）。
 - `--diff-against` 可指定基準；想保留某個時間點的基準，先把資料夾複製一份（例如 `spec_snapshots/latest-20260924/`）。
@@ -150,7 +150,7 @@ python run_check.py --base-url https://fedgpt-stg2-vm1.corp.ailabs.tw/swagger/do
 
 ## 目前已知的 spec 問題
 
-最新狀況以 [docs/REPORT.md](docs/REPORT.md) 為準。以下是反覆出現、需要負責人確認的問題（2026-09-29 stg2 v3.13）：
+最新狀況以 [docs/REPORT.md](docs/REPORT.md) 為準。以下是反覆出現、需要負責人確認的問題（2026-09-29 stg2-vm1 v3.13）：
 
 | 分頁 | 問題 |
 |---|---|
@@ -169,4 +169,4 @@ python run_check.py --base-url https://fedgpt-stg2-vm1.corp.ailabs.tw/swagger/do
 
 - **自動開 Jira 票**：原始需求之一，尚未實作（目標 project、issue type、欄位規則未定）。
 - **固定執行節奏 / 接 CI**：spec diff 是「跟上次執行比」，間隔太久會把多次變化壓成一包。
-- **要盯哪個環境**：dev（`latest`，跟最新開發）與 stg2（`v3.13`，跟發布版本）之外，是否要改看正式環境對外的版本。
+- **要盯哪個環境**：dev（`latest`，跟最新開發）與 stg2-vm1（`v3.13`，跟發布版本）之外，是否要改看正式環境對外的版本。

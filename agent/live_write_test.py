@@ -1057,7 +1057,7 @@ def run_fedflow_execute_test(entries, api_base_url, token, timeout=20, flow_id=N
 
     跟其他三組 CRUD 測試不同：execute 沒有 DELETE、執行了無法復原，所以不即興建立測試資料，
     而是固定打一個已人工確認過「無副作用」的 flow（見 config.FEDFLOW_TEST_FLOW_ID 的說明）。
-    這個 flow 目前只存在於 stg2，對其他環境跑會收到 404，此時視為「這個環境沒有可用的測試
+    這個 flow 目前只存在於 stg2-vm1，對其他環境跑會收到 404，此時視為「這個環境沒有可用的測試
     flow」而跳過，回報 info 等級的 live_write_skipped，不當成錯誤。
     """
     from .config import FEDFLOW_TEST_FLOW_ID
@@ -1097,7 +1097,7 @@ def run_fedflow_execute_test(entries, api_base_url, token, timeout=20, flow_id=N
                 "info",
                 filename,
                 group,
-                f"flow_id={flow_id} 在這個環境找不到（404），這個測試 flow 只在特定環境（stg2）建立，跳過這組測試",
+                f"flow_id={flow_id} 在這個環境找不到（404），這個測試 flow 只在特定環境（stg2-vm1）建立，跳過這組測試",
                 path=execute_path_template,
                 method="POST",
             )
@@ -1550,13 +1550,13 @@ def run_asura_tts_test(entries, api_base_url, token, timeout=60):
 
     base_body = {
         "input": {"text": "[agent-test] live-call 文字轉語音驗證", "type": "text"},
-        # spec 範例值 tts-general-0.0.1 在 stg2 實測不存在（inferno.get-model.failed）；
+        # spec 範例值 tts-general-0.0.1 在 stg2-vm1 實測不存在（inferno.get-model.failed）；
         # 實際問過才確認 tts-general-1.3.3 才是這個環境真正可用的 TTS 模型版本。
         "modelConfig": {"model": "tts-general-1.3.3", "voice": "yating"},
     }
 
     # 這個發現是固定記錄，不是靠現場觸發錯誤才報：spec 對 modelConfig.model 給的範例值
-    # `tts-general-0.0.1` 實測在 stg2 並不存在（打下去後端回 inferno.get-model.failed，
+    # `tts-general-0.0.1` 實測在 stg2-vm1 並不存在（打下去後端回 inferno.get-model.failed，
     # 內部查模型收到 404），而且 spec 完全沒有提供任何端點可以查詢這個部署實際支援的 TTS
     # 模型名稱——不像 Chat V2 有 GET /models 可查。確認可用的版本（`tts-general-1.3.3`）
     # 是額外詢問熟悉部署的人才拿到的，不是文件或 API 能自己查出來的。
@@ -1566,7 +1566,7 @@ def run_asura_tts_test(entries, api_base_url, token, timeout=60):
             "warning",
             filename,
             group,
-            "SpeechModelConfig.model 的 spec 範例值 'tts-general-0.0.1' 在 stg2 實測不存在（後端查模型收到 404，reason=inferno.get-model.failed），"
+            "SpeechModelConfig.model 的 spec 範例值 'tts-general-0.0.1' 在 stg2-vm1 實測不存在（後端查模型收到 404，reason=inferno.get-model.failed），"
             "且 spec 沒有提供任何端點可查詢這個部署實際支援的 TTS 模型名稱清單（不像 Chat V2 有 GET /models）——正確版本（tts-general-1.3.3）只能問熟悉部署的人才拿得到",
             path=tts_path,
             method="POST",
@@ -1903,7 +1903,7 @@ def _prepare_knowledge_params(session, base, timeout, findings):
     filename, group = "chat-v2.yaml", "Chat V2"
 
     # 名稱要每次呼叫都不同：這個 helper 會被 knowledge/agentic-rag 的一般版與串流版共 4 個測試各呼叫一次，
-    # 如果用固定名稱，一旦前一次建立的知識庫卡在索引中沒被清乾淨（stg2 曾發生過），
+    # 如果用固定名稱，一旦前一次建立的知識庫卡在索引中沒被清乾淨（stg2-vm1 曾發生過），
     # 後面幾次用同名字建立就會撞到 409 conflict，連帶讓其他測試也跳過。
     knowledge_name = TEST_TITLE + f"（chat mode 測試用 {uuid.uuid4().hex[:8]}）"
 
