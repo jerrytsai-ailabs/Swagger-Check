@@ -2,22 +2,23 @@
 
 > 這份檔案由 `run_check.py` 每次執行自動覆寫，請勿手動編輯。完整細節請看同一次執行產生的 `reports/FedGPT-API-Review-*.html`。
 
-- 最後更新：2026-10-01 18:13:08 +0800
+- 最後更新：2026-10-05 14:36:36 +0800
 - 來源：https://fedgpt-stg2-vm1.corp.ailabs.tw/swagger/
-- 這次跑的階段：靜態比對、Live GET、Live 寫入、LLM 審查
+- 這次跑的階段：靜態比對、Live GET、Live 寫入、Spec diff、LLM 審查
 
 | 整體結果 | Pass | Fail | Endpoint 總數 | Pass 率 |
 |---|---|---|---|---|
-| **FAIL** | 63 | 18 | 81 | 77.8% |
+| **FAIL** | 65 | 17 | 82 | 79.3% |
 
 | 總發現數 | Error | Warning | Info | 無發現的分頁 |
 |---|---|---|---|---|
-| 210 | 49 | 47 | 114 | 0/10 |
+| 214 | 48 | 50 | 116 | 0/10 |
 
 ## 執行歷史
 
 | 時間 | 環境 | live-write | Pass 率 | Pass/總數 | Error | Warning | Info |
 |---|---|---|---|---|---|---|---|
+| 2026-10-05 14:36:36 +0800 | stg2-vm1 | ✓ | 79.3% | 65/82 | 48 | 50 | 116 |
 | 2026-10-01 18:13:08 +0800 | stg2-vm1 | ✓ | 77.8% | 63/81 | 49 | 47 | 114 |
 | 2026-10-01 10:02:16 +0800 | stg2-vm1 | ✓ | 79.0% | 64/81 | 48 | 47 | 114 |
 | 2026-10-01 09:37:51 +0800 | stg2-vm1 | ✓ | 77.8% | 63/81 | 49 | 47 | 114 |
@@ -38,24 +39,21 @@
 | Auth V2 | `auth-v2.yaml` | 12 個發現 |
 | Chat V2 | `chat-v2.yaml` | 64 個發現 |
 | FAQ V1 | `faq-v1.yaml` | 14 個發現 |
-| FedFlow V1 | `fedflow-v1.yaml` | 41 個發現 |
+| FedFlow V1 | `fedflow-v1.yaml` | 40 個發現 |
 | Helix V1 | `helix-v1.yaml` | 12 個發現 |
 | Knowledge V3 | `knowledge-v3.yaml` | 17 個發現 |
-| LLM V1 | `llm-v1.yaml` | 17 個發現 |
+| LLM V1 | `llm-v1.yaml` | 22 個發現 |
 
-## Error（42 筆，依根因合併）
+## Error（41 筆，依根因合併）
 
 | 階段 | 分頁 | Endpoint | 位置 | 問題 | 規則 | 筆數 |
 |---|---|---|---|---|---|---|
 | Live GET | Chat V2 | GET `/api/public/chat/v2/conversations` | `responses.200.conversations.N` | 實際回應在 conversations.N 不符合 spec 宣告的 schema：'disabled' is a required property | `response_schema_mismatch` | 5 |
 | Live GET | Chat V2 | GET `/api/public/chat/v2/faqs` | `responses.200.faqs.N` | 實際回應在 faqs.N 不符合 spec 宣告的 schema：'description' is a required property | `response_schema_mismatch` | 5 |
 | Live GET | Chat V2 | GET `/api/public/chat/v2/conversations/{convId}` | `responses.200.conversation` | 實際回應在 conversation 不符合 spec 宣告的 schema：'disabled' is a required property | `response_schema_mismatch` | 1 |
-| Live GET | Chat V2 | GET `/api/public/chat/v2/conversations/{convId}/messages` | `responses.200.messages.N.guardian` | 實際回應在 messages.N.guardian 不符合 spec 宣告的 schema：'biasScore' is a required property | `response_schema_mismatch` | 2 |
-| Live GET | Chat V2 | GET `/api/public/chat/v2/conversations/{convId}/messages` | `responses.200.messages.N.guardian` | 實際回應在 messages.N.guardian 不符合 spec 宣告的 schema：'hallucinationScore' is a required property | `response_schema_mismatch` | 2 |
-| Live GET | Chat V2 | GET `/api/public/chat/v2/conversations/{convId}/messages` | `responses.200.messages.N.humanInLoop` | 實際回應在 messages.N.humanInLoop 不符合 spec 宣告的 schema：None is not of type 'object' | `response_schema_mismatch` | 1 |
+| Live GET | Chat V2 | GET `/api/public/chat/v2/conversations/{convId}/messages` | `responses.200.flowMessages.items.N.sseEvents.N.content.role` | 實際回應在 flowMessages.items.N.sseEvents.N.content.role 不符合 spec 宣告的 schema：'' is not one of ['user', 'assistant', 'tool', 'system'] | `response_schema_mismatch` | 5 |
 | Live 寫入 | Chat V2 | GET `/api/public/chat/v2/conversations/{convId}` | `conversation` | 實際回應在 conversation 不符合 spec 宣告的 schema：'disabled' is a required property | `response_schema_mismatch` | 1 |
 | Live 寫入 | Knowledge V3 | DELETE `/api/public/knowledge/v3/knowledges/{knowledgeId}` | — | 實際回傳 423，但 spec 裡這支 endpoint 沒有宣告這個狀態碼（宣告的有：['200', '403', '404']）。回應內容：{"service":"grpc-knowledge","reason":"data.locked","message":"cannot delete kb with 1 documents; delete them first"}（X-Request-Id: <id>） | `undocumented_status_code` | 1 |
-| Live 寫入 | FedFlow V1 | GET `/api/public/fedflow/v1/executions/{executionId}/result` | `state` | 實際回應在 state 不符合 spec 宣告的 schema：'PENDING' is not one of ['INPROGRESS', 'FINISHED', 'ERROR', 'TERMINATED', 'TIMEOUT', 'STOPPED'] | `response_schema_mismatch` | 1 |
 | Live 寫入 | Helix V1 | POST `/api/public/helix/v1/voices` | — | 實際回傳 502，但 spec 裡這支 endpoint 沒有宣告這個狀態碼（宣告的有：['200', '400']）。回應內容：{"service":"","reason":"","message":"502: {\"detail\":{\"error\":\"AUDIO_FETCH_FAILED\",\"message\":\"audio_uri must be an absolute path or http(s) URL, got: 'tmp/<id>'\"}}"}（X-Request-Id: <id>） | `undocumented_status_code` | 1 |
 | Live 寫入 | Chat V2 | POST `/api/public/chat/v2/chat/normal` | `messages.N.guardian` | 實際回應在 messages.N.guardian 不符合 spec 宣告的 schema：'biasScore' is a required property | `response_schema_mismatch` | 1 |
 | Live 寫入 | Chat V2 | POST `/api/public/chat/v2/chat/normal` | `messages.N.guardian` | 實際回應在 messages.N.guardian 不符合 spec 宣告的 schema：'hallucinationScore' is a required property | `response_schema_mismatch` | 1 |
@@ -80,7 +78,7 @@
 | Live 寫入 | Asura V1 | POST `/api/public/asura/v1/speeches:zero-shot` | — | POST 零樣本語音克隆沒有回 200（實際 500）。回應內容：{"service":"http-gateway","reason":"data.unhandled","message":"unexpected status code: 400"}（X-Request-Id: <id>），中止測試 | `live_write_aborted` | 1 |
 | Live 寫入 | Auth V2 | POST `/api/public/auth/v2/logout` | — | 實際回傳 401，但 spec 裡這支 endpoint 沒有宣告這個狀態碼（宣告的有：['200']）。回應內容：{"service":"grpc-auth","reason":"auth.invalid-auth","message":"token is revoked"}（X-Request-Id: <id>） | `undocumented_status_code` | 1 |
 
-## Warning（47 筆，依根因合併）
+## Warning（50 筆，依根因合併）
 
 | 階段 | 分頁 | Endpoint | 位置 | 問題 | 規則 | 筆數 |
 |---|---|---|---|---|---|---|
@@ -121,6 +119,9 @@
 | 靜態比對 | Knowledge V3 | POST `/api/public/knowledge/v3/knowledges/{knowledgeId}/documents` | `responses.200.document` | 欄位 `document` 沒有 description | `missing_property_description` | 1 |
 | 靜態比對 | LLM V1 | — | `components.schemas.UpstreamError.error` | 欄位 `error` 沒有 description | `missing_property_description` | 1 |
 | 靜態比對 | LLM V1 | — | `components.schemas.CreateTranscriptionRequest.file` | 這個欄位沒有 example | `missing_example` | 1 |
+| 靜態比對 | LLM V1 | — | `components.schemas.ClientConfig.llm` | 欄位 `llm` 沒有 description | `missing_property_description` | 1 |
+| 靜態比對 | LLM V1 | — | `components.schemas.ClientConfig.asr` | 欄位 `asr` 沒有 description | `missing_property_description` | 1 |
+| 靜態比對 | LLM V1 | — | `components.schemas.ClientConfig.tts` | 欄位 `tts` 沒有 description | `missing_property_description` | 1 |
 | 靜態比對 | SSE 串流 | POST `/chat/v2/chat/agent:stream` | — | SSE 說明文件把 `POST /chat/v2/chat/agent:stream`（分頁：Flowise V3）列為串流端點，但在該分頁的 spec 裡找不到這支端點，可能已改名、搬家，或分頁本身沒有被抓取，文件需要更新 | `sse_doc_endpoint_not_found` | 1 |
 | 靜態比對 | SSE 串流 | GET `/chat/v2/chat/agent/{convId}/stream` | — | SSE 說明文件把 `GET /chat/v2/chat/agent/{convId}/stream`（分頁：Flowise V3）列為串流端點，但在該分頁的 spec 裡找不到這支端點，可能已改名、搬家，或分頁本身沒有被抓取，文件需要更新 | `sse_doc_endpoint_not_found` | 1 |
 | Live 寫入 | Knowledge V3 | DELETE `/api/public/knowledge/v3/knowledges/{knowledgeId}` | — | spec 對 DELETE /knowledges/{knowledgeId} 的描述寫「⚠️ 底下的文件會一起消失，而且無法復原」，但實測在文件仍存在時呼叫，回應是 423（非 200），代表知識庫必須先清空文件才能刪除——文件描述的行為與實際行為不一致，建議修正文件說明或修正實作其中一邊 | `spec_description_mismatch` | 1 |
@@ -135,6 +136,7 @@
 
 | 規則 | 筆數 |
 |---|---|
+| `endpoint_added` | 1 |
 | `live_write_ok` | 22 |
 | `live_write_permanent_residue` | 10 |
 | `live_write_skipped` | 2 |
@@ -143,7 +145,7 @@
 
 > AI 對 description 清晰度與邏輯一致性的判斷，僅供參考；每次執行結果會有些浮動，diff 時請留意。
 
-Pass 80 支、Fail 1 支。
+Pass 81 支、Fail 1 支。
 
 | 階段 | 分頁 | Endpoint | 位置 | 問題 | 規則 | 筆數 |
 |---|---|---|---|---|---|---|
