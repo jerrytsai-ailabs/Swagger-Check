@@ -20,7 +20,7 @@ SPEC_FILES = [
     ("FedFlow V1", "fedflow-v1.yaml", True),
     ("Helix V1", "helix-v1.yaml", True),
     ("Knowledge V3", "knowledge-v3.yaml", True),
-    ("LLM V1", "llm-v1.yaml", True),
+    ("OpenAI V1", "openai-v1.yaml", True),
 ]
 
 HTTP_METHODS = {"get", "post", "put", "patch", "delete", "options", "head"}

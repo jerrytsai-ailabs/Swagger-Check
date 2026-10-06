@@ -108,7 +108,7 @@ python run_check.py --base-url https://fedgpt-stg2-vm1.corp.ailabs.tw/swagger/do
 | 端點 | 為什麼還沒測 |
 |---|---|
 | FedFlow `POST/DELETE /packages/{language}`、`POST /packages/{language}/reset` | 套件裝卸作用在**整站共用**的執行環境，會影響所有 flow，需要先確定安全的測試方式 |
-| LLM V1 `POST /fedgpt/v1/audio/transcriptions`、`POST /fedgpt/v1/audio/speech` | 新增的 OpenAI 相容端點，尚未補測試 |
+| OpenAI V1 `POST /fedgpt/v1/audio/transcriptions`、`POST /fedgpt/v1/audio/speech` | 新增的 OpenAI 相容端點，尚未補測試 |
 
 ### Spec diff 的比對基準
 
@@ -161,7 +161,7 @@ python run_check.py --base-url https://fedgpt-stg2-vm1.corp.ailabs.tw/swagger/do
 | Knowledge V3 | `DELETE /knowledges/{id}` 文件寫「底下文件一起消失」，實際要先清空文件，否則回未宣告的 `423` |
 | Auth V2 | `logout` 敘述提到 401，但 `responses` 只宣告 200 |
 | FedFlow V1 | 執行結果的 `state` 出現未宣告的 `PENDING` |
-| LLM V1 | `retriever/v1/embeddings` 的 404 說明疑似從 400 複製貼上（LLM 審查） |
+| OpenAI V1 | `retriever/v1/embeddings` 的 404 說明疑似從 400 複製貼上（LLM 審查） |
 
 ---
 

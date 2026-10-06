@@ -1478,12 +1478,12 @@ def run_auth_apikey_crud_test(entries, api_base_url, token, timeout=30):
 
 
 def run_llm_embeddings_test(entries, api_base_url, token, timeout=30):
-    """測試 LLM V1 的 embeddings（`POST /llm/v1/retriever/v1/embeddings`）。
+    """測試 OpenAI V1 的 embeddings（`POST /llm/v1/retriever/v1/embeddings`）。
 
     這支是無狀態的呼叫——沒有持久化資源，呼叫完就結束，不需要任何清理。
     """
     findings = []
-    filename, group = "llm-v1.yaml", "LLM V1"
+    filename, group = "openai-v1.yaml", "OpenAI V1"
     spec, paths = _load_spec_for_test(entries, filename, group, findings)
     if spec is None:
         return findings
@@ -2764,14 +2764,14 @@ def run_chat_tabular_stream_test(entries, api_base_url, token, timeout=90):
 
 
 def run_llm_visual_completions_test(entries, api_base_url, token, timeout=60):
-    """測試 LLM V1 的圖片對話（`POST /llm/v1/visual/v1/chat/completions`）。
+    """測試 OpenAI V1 的圖片對話（`POST /llm/v1/visual/v1/chat/completions`）。
 
     無狀態呼叫，不需要清理。用一個公開、穩定的測試圖片網址（httpbin.org 的靜態測試圖）——
     如果部署環境對外連線有限制、連不到這個網址，這裡會回報成失敗，但那其實是環境限制，
     不是這支 API 本身的問題，回報訊息裡會註明這個可能性。
     """
     findings = []
-    filename, group = "llm-v1.yaml", "LLM V1"
+    filename, group = "openai-v1.yaml", "OpenAI V1"
     spec, paths = _load_spec_for_test(entries, filename, group, findings)
     if spec is None:
         return findings
@@ -3319,7 +3319,7 @@ def run_helix_voice_search_by_audio_test(entries, api_base_url, token, timeout=1
 
 
 def run_llm_chat_completions_test(entries, api_base_url, token, timeout=60):
-    """測試 LLM V1 的文字對話（`POST /llm/v1/fedgpt/v1/chat/completions`，OpenAI 相容）。
+    """測試 OpenAI V1 的文字對話（`POST /llm/v1/fedgpt/v1/chat/completions`，OpenAI 相容）。
 
     先 `GET /llm/v1/fedgpt/v1/models` 拿模型清單：**第一筆是代稱**（解到本部署當下的預設
     模型），優先用它；spec 提到代稱在模型只有部分 replica 就緒時可能回 404，這時改用清單
@@ -3329,7 +3329,7 @@ def run_llm_chat_completions_test(entries, api_base_url, token, timeout=60):
     所以 `max_tokens` 特意設小。
     """
     findings = []
-    filename, group = "llm-v1.yaml", "LLM V1"
+    filename, group = "openai-v1.yaml", "OpenAI V1"
     spec, paths = _load_spec_for_test(entries, filename, group, findings)
     if spec is None:
         return findings

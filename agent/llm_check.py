@@ -4,7 +4,7 @@
     - 同一個欄位的說明前後矛盾（例如同時說「必填」又說「可省略」）
     - 敘述含糊、看完還是不知道該填什麼
 
-用的是 FedGPT 自己的 LLM API（llm-v1.yaml 那個分頁），一個 operation 打一次（把這個 endpoint
+用的是 FedGPT 自己的 LLM API（openai-v1.yaml，Swagger 上的 OpenAI V1 分頁；10/6 前叫 llm-v1.yaml / LLM V1），一個 operation 打一次（把這個 endpoint
 自己的 summary/description，以及 request/response 裡每個有寫 description 的欄位，一次打包
 成一個 prompt），比照每個欄位都打一次更省呼叫次數，也讓模型能一次看到同一支 endpoint 裡
 所有描述、才抓得到「兩個欄位互相矛盾」這種需要對照著看的問題。
