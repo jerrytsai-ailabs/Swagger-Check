@@ -143,5 +143,37 @@
     "error": 49,
     "warning": 48,
     "info": 119
+  },
+  {
+    "generated_at": "2026-10-07 15:18:04 +0800",
+    "env": "stg2-vm1",
+    "phases": [
+      "static",
+      "live",
+      "live_write",
+      "diff",
+      "llm"
+    ],
+    "endpoint_pass": 68,
+    "endpoint_fail": 17,
+    "endpoint_total": 85,
+    "error": 39,
+    "warning": 52,
+    "info": 140
+  },
+  {
+    "generated_at": "2026-10-07 15:49:53 +0800",
+    "env": "stg2-vm1",
+    "phases": [
+      "static",
+      "live",
+      "llm"
+    ],
+    "endpoint_pass": 79,
+    "endpoint_fail": 6,
+    "endpoint_total": 85,
+    "error": 18,
+    "warning": 44,
+    "info": 83
   }
 ]

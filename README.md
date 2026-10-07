@@ -87,6 +87,17 @@ python run_check.py --base-url https://fedgpt-stg2-vm1.corp.ailabs.tw/swagger/do
 
 `--live`/`--live-write`/`--llm-check` 開跑前會先確認 token 有效，失效就直接中止並印出原因，不會產生一整排誤導性的 401 結果。
 
+**每日定時檢查（Windows）**：`scheduled_run.ps1` 會先確認連得到 stg2-vm1（連不到就跳過，不留無效的執行歷史），再跑 `test_stg2.ps1 --live-write --notify-teams --notify-confluence`（Confluence 需要 `.env` 裡的 `CONFLUENCE_EMAIL` / `CONFLUENCE_API_TOKEN`），輸出存到 `logs/scheduled-<日期時間>.log`。註冊成平日 09:30 的排程（用自己的帳號、登入時才跑；錯過時間會在開機後補跑）：
+
+```powershell
+$action  = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$PWD\scheduled_run.ps1`""
+$trigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At 09:30
+$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Hours 2)
+Register-ScheduledTask -TaskName "SwaggerAgent stg2-vm1 daily" -Action $action -Trigger $trigger -Settings $settings
+```
+
+想立刻試跑：`Start-ScheduledTask "SwaggerAgent stg2-vm1 daily"`；停用：`Disable-ScheduledTask "SwaggerAgent stg2-vm1 daily"`。每天都會更新 `docs/REPORT.md` 與執行歷史（只保留最近 30 筆），寫入測試每次約留下 10 筆刪不掉的資料。
+
 ---
 
 ## 檢查內容
