@@ -51,6 +51,9 @@ KNOWLEDGE_DOC_INDEX_TERMINAL_STATES = {"completed", "error", "cancelled", "skip"
 TRANSCRIPTION_POLL_INTERVAL_SECONDS = 5
 TRANSCRIPTION_POLL_MAX_ATTEMPTS = 30
 TRANSCRIPTION_TERMINAL_STATUSES = {"completed", "error", "expired"}
+# stg2-vm1 實際部署的 ASR 模型版本（RD 於 FEDGPT-17039 確認；舊的 1.3.1 已下架，9/29 起一律 500）。
+# spec 範例值 asr-general-1.1.0 不是這個環境實際有的版本。部署端升版後要跟著改這裡。
+ASR_TEST_MODEL = "asr-general-1.4.0"
 
 
 def _finding(rule, severity, file, group, message, path=None, method=None, location=""):
@@ -2303,12 +2306,13 @@ def run_asura_transcription_test(entries, api_base_url, token, timeout=60):
     if not asset_key:
         return findings
 
-    # 建立轉錄工作。asr-general-1.3.1 是實測確認可用的版本（spec 範例 asr-general-1.1.0
-    # 未必是這個環境實際部署的版本，跟 TTS 那邊遇到的情況一樣，這裡直接用已知可用的版本）
+    # 建立轉錄工作。模型版本用 ASR_TEST_MODEL（spec 範例 asr-general-1.1.0 未必是這個環境
+    # 實際部署的版本，跟 TTS 那邊遇到的情況一樣，這裡直接用已知可用的版本）。
+    # lang 要跟測試音檔的語言一致：harvard.aac 是英文，帶 zh 會回 completed 但 sentences 是空的。
     try:
         resp = session.post(
             f"{base}{transcriptions_path}",
-            json={"assetKey": asset_key, "modelConfig": {"model": "asr-general-1.3.1", "lang": "zh"}},
+            json={"assetKey": asset_key, "modelConfig": {"model": ASR_TEST_MODEL, "lang": "en"}},
             timeout=timeout,
         )
     except requests.RequestException as exc:
@@ -2413,7 +2417,7 @@ def run_asura_neartime_token_test(entries, api_base_url, token, timeout=30):
     base = api_base_url.rstrip("/")
 
     try:
-        resp = session.post(f"{base}{neartime_path}", json={"modelConfig": {"model": "asr-general-1.3.1", "lang": "zh"}}, timeout=timeout)
+        resp = session.post(f"{base}{neartime_path}", json={"modelConfig": {"model": ASR_TEST_MODEL, "lang": "zh"}}, timeout=timeout)
     except requests.RequestException as exc:
         findings.append(_finding("live_write_error", "error", filename, group, f"POST 取得即時轉錄 token 失敗：{exc}", path=neartime_path, method="POST"))
         return findings
