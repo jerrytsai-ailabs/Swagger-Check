@@ -8,6 +8,7 @@
     - 欄位型別改變
     - enum 合法值被移除（破壞性）或新增
     - 宣告的回應狀態碼被移除或新增
+    - components.schemas 裡的共用 schema 被新增／移除，以及它們內部的上述變化
 比對完，不管有沒有變化，都會把這次的內容存回去當作下次比對的基準。
 """
 
@@ -245,6 +246,34 @@ def _diff_operation(old_op, new_op, file, group, path, method, findings):
             _diff_schema(old_schema, new_schema, file, group, path, method, f"responses.{status}", findings)
 
 
+def _diff_components(old_spec, new_spec, file, group, findings):
+    """比對 components.schemas 裡每個具名 schema。
+
+    paths 底下的比對遇到 $ref 就停（見 _diff_schema），所以被引用的共用 schema 內容改了——例如
+    Conversation 的 required 拿掉 disabled——只有在這裡才看得到。每個 schema 只比一次，不會在每個
+    引用點重複報；location 用 components.schemas.<名稱>，跟靜態檢查的寫法一致。
+    """
+    old_schemas = ((old_spec.get("components") or {}).get("schemas")) or {}
+    new_schemas = ((new_spec.get("components") or {}).get("schemas")) or {}
+    for name in set(old_schemas) - set(new_schemas):
+        findings.append(
+            _finding(
+                "schema_removed",
+                "warning",
+                file,
+                group,
+                f"共用 schema `{name}` 被移除了",
+                location=f"components.schemas.{name}",
+            )
+        )
+    for name in set(new_schemas) - set(old_schemas):
+        findings.append(
+            _finding("schema_added", "info", file, group, f"新增了共用 schema `{name}`", location=f"components.schemas.{name}")
+        )
+    for name in sorted(set(old_schemas) & set(new_schemas)):
+        _diff_schema(old_schemas[name], new_schemas[name], file, group, None, None, f"components.schemas.{name}", findings)
+
+
 def run_spec_diff(entries, snapshot_dir=SNAPSHOT_DIR_DEFAULT, diff_against=None):
     """比對這次抓到的 spec 跟快照的差異。
 
@@ -346,6 +375,8 @@ def run_spec_diff(entries, snapshot_dir=SNAPSHOT_DIR_DEFAULT, diff_against=None)
                     )
                 for m in old_methods & new_methods:
                     _diff_operation(old_item[m], new_item[m], entry["filename"], entry["group"], p, m, findings)
+
+            _diff_components(old_spec, new_spec, entry["filename"], entry["group"], findings)
 
         _save_snapshot(own_dir, entry["filename"], entry["raw_text"])
 
