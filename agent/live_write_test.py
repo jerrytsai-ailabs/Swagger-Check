@@ -54,6 +54,13 @@ TRANSCRIPTION_TERMINAL_STATUSES = {"completed", "error", "expired"}
 # stg2-vm1 實際部署的 ASR 模型版本（RD 於 FEDGPT-17039 確認；舊的 1.3.1 已下架，9/29 起一律 500）。
 # spec 範例值 asr-general-1.1.0 不是這個環境實際有的版本。部署端升版後要跟著改這裡。
 ASR_TEST_MODEL = "asr-general-1.4.0"
+# test-data/harvard.aac 的逐字稿（Harvard sentences 第 1 組前 6 句，10/8 用 asr-general-1.4.0 轉錄核對過前 4 句），
+# 零樣本語音克隆的 input.promptText 必填，要照範本音檔逐字填。換測試音檔時要跟著改。
+ZERO_SHOT_PROMPT_TEXT = (
+    "The stale smell of old beer lingers. It takes heat to bring out the odor. "
+    "A cold dip restores health and zest. A salt pickle tastes fine with ham. "
+    "Tacos al pastor are my favorite. A zestful food is the hot cross bun."
+)
 
 
 def _finding(rule, severity, file, group, message, path=None, method=None, location=""):
@@ -3036,8 +3043,9 @@ def run_asura_speech_zero_shot_test(entries, api_base_url, token, timeout=60):
     這個部署可能沒開這支端點（跟固定音色版一樣，404 視為「環境沒這個功能」而跳過）。
     modelConfig.model 沿用 run_asura_tts_test 已經確認在這個環境可用的 tts-general-1.3.3；
     如果零樣本版本其實要用不同的模型名稱而失敗，會記成新的 spec 落差，不會亂猜其他名字。
-    `promptText`（音檔的逐字稿）是選填欄位，這裡沒有精確逐字稿就不填，不影響呼叫成不成功，
-    只影響合成音色像不像範本，不在這支 API 正確性測試的範圍內。
+    10/12 起 spec 把 `input.promptText`（範本音檔的逐字稿）與 `audioConfig` 改成必填，後端也會
+    擋（400 data.validation），所以這裡兩個都帶：promptText 用 harvard.aac 的逐字稿
+    （ZERO_SHOT_PROMPT_TEXT），audioConfig 跟固定音色版一樣用 LINEAR16。
     """
     from .config import HELIX_TEST_AUDIO_PATH
 
@@ -3059,27 +3067,27 @@ def run_asura_speech_zero_shot_test(entries, api_base_url, token, timeout=60):
     session = _make_session(token)
     base = api_base_url.rstrip("/")
 
-    # Step 0：故意不帶 promptVoiceUrl/promptVoiceAssetKey，實測 spec 沒把它們標必填是否屬實
-    # （ZeroShotSpeechInput.input 的 required 只列了 text）。
+    # Step 0：其他必填都帶齊、只故意不帶 promptVoiceUrl/promptVoiceAssetKey。spec 的 input 說明
+    # 寫「兩個都沒帶會回 400」（schema 沒辦法表達擇一，所以只寫在說明裡），驗證實際是不是這樣。
     try:
         probe_resp = session.post(
             f"{base}{zero_shot_path}",
-            json={"input": {"text": "[agent-test] 探測用，不帶語音範本"}, "modelConfig": {"model": "tts-general-1.3.3"}},
+            json={
+                "input": {"text": "[agent-test] 探測用，不帶語音範本", "type": "text", "promptText": ZERO_SHOT_PROMPT_TEXT},
+                "modelConfig": {"model": "tts-general-1.3.3"},
+                "audioConfig": {"encoding": "LINEAR16"},
+            },
             timeout=timeout,
         )
-        if probe_resp.status_code not in (200, 404):
-            try:
-                probe_msg = probe_resp.json().get("message", "")
-            except ValueError:
-                probe_msg = ""
+        if probe_resp.status_code not in (400, 404):
             findings.append(
                 _finding(
                     "spec_description_mismatch",
                     "warning",
                     filename,
                     group,
-                    f"spec 的 ZeroShotSpeechInput.input 只把 text 標成必填，promptVoiceUrl/promptVoiceAssetKey 兩個都是選填，"
-                    f"但兩個都不帶實際回應是 {probe_resp.status_code}：{probe_msg}——代表伺服器端其實兩者擇一是必填",
+                    f"spec 說明寫 promptVoiceUrl 與 promptVoiceAssetKey 兩個都沒帶會回 400，"
+                    f"但實際回應是 {probe_resp.status_code}。{_response_excerpt(probe_resp)}",
                     path=zero_shot_path,
                     method="POST",
                 )
@@ -3107,8 +3115,14 @@ def run_asura_speech_zero_shot_test(entries, api_base_url, token, timeout=60):
         return findings
 
     body = {
-        "input": {"text": "[agent-test] live-call 零樣本語音克隆驗證", "type": "text", "promptVoiceAssetKey": asset_key},
+        "input": {
+            "text": "[agent-test] live-call 零樣本語音克隆驗證",
+            "type": "text",
+            "promptVoiceAssetKey": asset_key,
+            "promptText": ZERO_SHOT_PROMPT_TEXT,
+        },
         "modelConfig": {"model": "tts-general-1.3.3"},
+        "audioConfig": {"encoding": "LINEAR16"},
     }
 
     try:

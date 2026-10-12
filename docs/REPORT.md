@@ -2,22 +2,23 @@
 
 > 這份檔案由 `run_check.py` 每次執行自動覆寫，請勿手動編輯。完整細節請看同一次執行產生的 `reports/FedGPT-API-Review-*.html`。
 
-- 最後更新：2026-10-08 09:34:20 +0800
+- 最後更新：2026-10-12 09:34:54 +0800
 - 來源：https://fedgpt-stg2-vm1.corp.ailabs.tw/swagger/
 - 這次跑的階段：靜態比對、Live GET、Live 寫入、LLM 審查
 
 | 整體結果 | Pass | Fail | Endpoint 總數 | Pass 率 |
 |---|---|---|---|---|
-| **FAIL** | 67 | 18 | 85 | 78.8% |
+| **FAIL** | 70 | 15 | 85 | 82.4% |
 
 | 總發現數 | Error | Warning | Info | 無發現的分頁 |
 |---|---|---|---|---|
-| 213 | 44 | 52 | 117 | 0/10 |
+| 210 | 40 | 49 | 121 | 0/10 |
 
 ## 執行歷史
 
 | 時間 | 環境 | live-write | Pass 率 | Pass/總數 | Error | Warning | Info |
 |---|---|---|---|---|---|---|---|
+| 2026-10-12 09:34:54 +0800 | stg2-vm1 | ✓ | 82.4% | 70/85 | 40 | 49 | 121 |
 | 2026-10-08 09:34:20 +0800 | stg2-vm1 | ✓ | 78.8% | 67/85 | 44 | 52 | 117 |
 | 2026-10-07 15:49:53 +0800 | stg2-vm1 | — | 92.9% | 79/85 | 18 | 44 | 83 |
 | 2026-10-07 15:18:04 +0800 | stg2-vm1 | ✓ | 80.0% | 68/85 | 39 | 52 | 140 |
@@ -40,15 +41,15 @@
 | Admin V1 | `admin-v1.yaml` | 4 個發現 |
 | Asset V2 | `asset-v2.yaml` | 9 個發現 |
 | Asura V1 | `asura-v1.yaml` | 19 個發現 |
-| Auth V2 | `auth-v2.yaml` | 13 個發現 |
+| Auth V2 | `auth-v2.yaml` | 12 個發現 |
 | Chat V2 | `chat-v2.yaml` | 64 個發現 |
 | FAQ V1 | `faq-v1.yaml` | 14 個發現 |
-| FedFlow V1 | `fedflow-v1.yaml` | 45 個發現 |
+| FedFlow V1 | `fedflow-v1.yaml` | 44 個發現 |
 | Helix V1 | `helix-v1.yaml` | 12 個發現 |
 | Knowledge V3 | `knowledge-v3.yaml` | 17 個發現 |
-| OpenAI V1 | `openai-v1.yaml` | 16 個發現 |
+| OpenAI V1 | `openai-v1.yaml` | 15 個發現 |
 
-## Error（42 筆，依根因合併）
+## Error（40 筆，依根因合併）
 
 | 階段 | 分頁 | Endpoint | 位置 | 問題 | 規則 | 筆數 |
 |---|---|---|---|---|---|---|
@@ -60,7 +61,6 @@
 | Live GET | Chat V2 | GET `/api/public/chat/v2/conversations/{convId}/messages` | `responses.200.messages.N.humanInLoop` | 實際回應在 messages.N.humanInLoop 不符合 spec 宣告的 schema：None is not of type 'object' | `response_schema_mismatch` | 1 |
 | Live 寫入 | Chat V2 | GET `/api/public/chat/v2/conversations/{convId}` | `conversation` | 實際回應在 conversation 不符合 spec 宣告的 schema：'disabled' is a required property | `response_schema_mismatch` | 1 |
 | Live 寫入 | Knowledge V3 | DELETE `/api/public/knowledge/v3/knowledges/{knowledgeId}` | — | 實際回傳 423，但 spec 裡這支 endpoint 沒有宣告這個狀態碼（宣告的有：['200', '403', '404']）。回應內容：{"service":"grpc-knowledge","reason":"data.locked","message":"cannot delete kb with 1 documents; delete them first"}（X-Request-Id: <id>） | `undocumented_status_code` | 1 |
-| Live 寫入 | FedFlow V1 | GET `/api/public/fedflow/v1/executions/{executionId}/result` | `state` | 實際回應在 state 不符合 spec 宣告的 schema：'PENDING' is not one of ['INPROGRESS', 'FINISHED', 'ERROR', 'TERMINATED', 'TIMEOUT', 'STOPPED'] | `response_schema_mismatch` | 1 |
 | Live 寫入 | Helix V1 | POST `/api/public/helix/v1/voices` | — | 實際回傳 502，但 spec 裡這支 endpoint 沒有宣告這個狀態碼（宣告的有：['200', '400']）。回應內容：{"service":"","reason":"","message":"502: {\"detail\":{\"error\":\"AUDIO_FETCH_FAILED\",\"message\":\"audio_uri must be an absolute path or http(s) URL, got: 'tmp/<id>'\"}}"}（X-Request-Id: <id>） | `undocumented_status_code` | 1 |
 | Live 寫入 | Chat V2 | POST `/api/public/chat/v2/chat/normal` | `messages.N.guardian` | 實際回應在 messages.N.guardian 不符合 spec 宣告的 schema：'biasScore' is a required property | `response_schema_mismatch` | 1 |
 | Live 寫入 | Chat V2 | POST `/api/public/chat/v2/chat/normal` | `messages.N.guardian` | 實際回應在 messages.N.guardian 不符合 spec 宣告的 schema：'hallucinationScore' is a required property | `response_schema_mismatch` | 1 |
@@ -76,16 +76,13 @@
 | Live 寫入 | Chat V2 | POST `/api/public/chat/v2/chat/faq` | `messages.N.humanInLoop` | 實際回應在 messages.N.humanInLoop 不符合 spec 宣告的 schema：None is not of type 'object' | `response_schema_mismatch` | 1 |
 | Live 寫入 | Chat V2 | POST `/api/public/chat/v2/chat/tabular` | — | 實際回傳 423，但 spec 裡這支 endpoint 沒有宣告這個狀態碼（宣告的有：['200', '400', '403', '404', '410']）。回應內容：{"service":"grpc-knowledge","reason":"data.locked","message":"tabular not ready for query"}（X-Request-Id: <id>） | `undocumented_status_code` | 1 |
 | Live 寫入 | Chat V2 | POST `/api/public/chat/v2/chat/tabular` | — | POST 送訊息（tabular）沒有回 200（實際 423），中止測試（仍會清理臨時資源） | `live_write_aborted` | 1 |
-| Live 寫入 | Asura V1 | POST `/api/public/asura/v1/transcriptions` | — | 實際回傳 500，但 spec 裡這支 endpoint 沒有宣告這個狀態碼（宣告的有：['200', '400']）。回應內容：{"service":"http-api","reason":"inferno.get-model.failed","message":"Received non-OK response, status_code: 404"}（X-Request-Id: <id>） | `undocumented_status_code` | 1 |
-| Live 寫入 | Asura V1 | POST `/api/public/asura/v1/transcriptions` | — | POST 建立轉錄工作沒有回 200（實際 500）。回應內容：{"service":"http-api","reason":"inferno.get-model.failed","message":"Received non-OK response, status_code: 404"}（X-Request-Id: <id>），中止測試 | `live_write_aborted` | 1 |
+| Live 寫入 | Asura V1 | GET `/api/public/asura/v1/transcriptions/{transcriptionId}` | `sentences.N` | 實際回應在 sentences.N 不符合 spec 宣告的 schema：'sentiment' is a required property | `response_schema_mismatch` | 3 |
 | Live 寫入 | Chat V2 | POST `/api/public/chat/v2/chat/tabular:stream` | — | 串流中途收到 event: error：{'service': 'grpc-knowledge', 'reason': 'data.locked', 'message': 'tabular not ready for query'} | `live_write_aborted` | 1 |
 | Live 寫入 | Helix V1 | POST `/api/public/helix/v1/enrollment` | — | 實際回傳 500，但 spec 裡這支 endpoint 沒有宣告這個狀態碼（宣告的有：['200', '400', '409']）。回應內容：{"service":"","reason":"","message":"500: Internal Server Error"}（X-Request-Id: <id>） | `undocumented_status_code` | 1 |
 | Live 寫入 | Helix V1 | POST `/api/public/helix/v1/enrollment` | — | POST 註冊聲紋沒有回 200（實際 500）。回應內容：{"service":"","reason":"","message":"500: Internal Server Error"}（X-Request-Id: <id>），中止測試 | `live_write_aborted` | 1 |
-| Live 寫入 | Asura V1 | POST `/api/public/asura/v1/speeches:zero-shot` | — | 實際回傳 500，但 spec 裡這支 endpoint 沒有宣告這個狀態碼（宣告的有：['200', '400', '404']）。回應內容：{"service":"http-gateway","reason":"data.unhandled","message":"unexpected status code: 400"}（X-Request-Id: <id>） | `undocumented_status_code` | 1 |
-| Live 寫入 | Asura V1 | POST `/api/public/asura/v1/speeches:zero-shot` | — | POST 零樣本語音克隆沒有回 200（實際 500）。回應內容：{"service":"http-gateway","reason":"data.unhandled","message":"unexpected status code: 400"}（X-Request-Id: <id>），中止測試 | `live_write_aborted` | 1 |
-| Live 寫入 | Auth V2 | POST `/api/public/auth/v2/logout` | — | 實際回傳 401，但 spec 裡這支 endpoint 沒有宣告這個狀態碼（宣告的有：['200']）。回應內容：{"service":"grpc-auth","reason":"auth.invalid-auth","message":"token is revoked"}（X-Request-Id: <id>） | `undocumented_status_code` | 1 |
+| Live 寫入 | Asura V1 | POST `/api/public/asura/v1/speeches:zero-shot` | — | POST 零樣本語音克隆沒有回 200（實際 400）。回應內容：{"service":"http-api","reason":"data.validation","message":"Key: 'zeroShotCreateRequest.Input.PromptText' Error:Field validation for 'PromptText' failed on the 'required' tag\nKey: 'zeroShotCreateRequest.AudioConfig' Error:Field validation for 'AudioConfig' failed on the 'required' tag"}（X-Request-Id: <id>），中止測試 | `live_write_aborted` | 1 |
 
-## Warning（50 筆，依根因合併）
+## Warning（49 筆，依根因合併）
 
 | 階段 | 分頁 | Endpoint | 位置 | 問題 | 規則 | 筆數 |
 |---|---|---|---|---|---|---|
@@ -136,26 +133,18 @@
 | Live 寫入 | Asura V1 | POST `/api/public/asura/v1/speeches:stream` | — | SpeechModelConfig.model 的 spec 範例值 'tts-general-0.0.1' 在 stg2-vm1 實測不存在（後端查模型收到 404，reason=inferno.get-model.failed），且 spec 沒有提供任何端點可查詢這個部署實際支援的 TTS 模型名稱清單（不像 Chat V2 有 GET /models）——正確版本（tts-general-1.3.3）只能問熟悉部署的人才拿得到 | `spec_description_mismatch` | 1 |
 | Live 寫入 | Asura V1 | POST `/api/public/asura/v1/speeches:stream` | — | spec 宣告 SpeechInput.audioConfig 是選填（required 只列 modelConfig），但不帶它實際回應是 400：Key: 'createRequest.AudioConfig' Error:Field validation for 'AudioConfig' failed on the 'required' tag——代表伺服器端其實把它當必填 | `spec_description_mismatch` | 1 |
 | Live 寫入 | Chat V2 | GET `/api/public/chat/v2/tabulars` | — | GET /chat/v2/tabulars 回傳的 Tabular schema（tabularId/name/description）沒有任何欄位可以判斷資源是否已就緒可查詢；實測發現部分既有 tabular 會在 chat/tabular 回 423 data.locked（'tabular not ready for query'），但這個狀態碼完全沒有寫進 chat/tabular 的 spec 文件，也無法事先得知 | `spec_description_mismatch` | 2 |
-| Live 寫入 | Asura V1 | POST `/api/public/asura/v1/speeches:zero-shot` | — | spec 的 ZeroShotSpeechInput.input 只把 text 標成必填，promptVoiceUrl/promptVoiceAssetKey 兩個都是選填，但兩個都不帶實際回應是 400：failed to validate request; validation error: key: value length must be at least 1 characters——代表伺服器端其實兩者擇一是必填 | `spec_description_mismatch` | 1 |
-| Live 寫入 | Asura V1 | POST `/api/public/asura/v1/speeches:zero-shot` | — | 帶 promptVoiceAssetKey（照 spec 建議走 transcriptions:presign 上傳）一律回 500 {"service":"http-gateway","reason":"data.unhandled","message":"unexpected status code: 400"}——代表 http-gateway 轉呼叫上游時收到 400，但沒有處理這個狀態碼的邏輯，直接包成看不出原因的 500。手動排查過：同一個 assetKey 打 /transcriptions 可以正常解析成真實網址並成功建立轉錄工作，改填那個已驗證能連得到的 promptVoiceUrl 給這支端點一樣回同一個 500——不是 assetKey 或模型名稱的問題，是這支端點處理語音範本輸入的路徑本身壞了，比較像後端 bug 而不是文件寫錯 | `spec_description_mismatch` | 1 |
+| Live 寫入 | Asura V1 | POST `/api/public/asura/v1/speeches:zero-shot` | — | spec 的 ZeroShotSpeechInput.input 只把 text 標成必填，promptVoiceUrl/promptVoiceAssetKey 兩個都是選填，但兩個都不帶實際回應是 400：promptVoiceUrl or promptVoiceAssetKey is required——代表伺服器端其實兩者擇一是必填 | `spec_description_mismatch` | 1 |
 
 ## Info（只列數量）
 
 | 規則 | 筆數 |
 |---|---|
-| `live_write_ok` | 22 |
-| `live_write_permanent_residue` | 10 |
+| `live_write_ok` | 23 |
+| `live_write_permanent_residue` | 11 |
 | `live_write_skipped` | 2 |
 
 ## LLM 文字審查
 
 > AI 對 description 清晰度與邏輯一致性的判斷，僅供參考；每次執行結果會有些浮動，diff 時請留意。
 
-Pass 83 支、Fail 2 支。
-
-| 階段 | 分頁 | Endpoint | 位置 | 問題 | 規則 | 筆數 |
-|---|---|---|---|---|---|---|
-| LLM 審查 | Asura V1 | POST `/api/public/asura/v1/transcriptions` | `[responses.200.progress]` | 描述稱「只有查詢端點會帶這個欄位，建立時的回應沒有」，但該欄位定義在 responses.200（建立請求的回應）中，與其描述矛盾。 | `llm_description_issue` | 1 |
-| LLM 審查 | Asura V1 | POST `/api/public/asura/v1/transcriptions` | — | 文字審查結果：Fail（1 筆問題，見上方 llm_description_issue） | `llm_review_fail` | 1 |
-| LLM 審查 | OpenAI V1 | GET `/api/public/llm/v1/client-config` | `[responses.200.llm.model]` | 描述中提到若未設定代稱請改用 `GET /models` 的第一筆，但端點本身的描述中提到的是 `GET /api/public/llm/v1/fedgpt/v1/models`，路徑不一致，可能導致開發者找不到正確的替代端點。 | `llm_description_issue` | 1 |
-| LLM 審查 | OpenAI V1 | GET `/api/public/llm/v1/client-config` | — | 文字審查結果：Fail（1 筆問題，見上方 llm_description_issue） | `llm_review_fail` | 1 |
+Pass 85 支、Fail 0 支。
