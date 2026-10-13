@@ -223,5 +223,22 @@
     "error": 21,
     "warning": 48,
     "info": 122
+  },
+  {
+    "generated_at": "2026-10-13 09:35:43 +0800",
+    "env": "stg2-vm1",
+    "phases": [
+      "static",
+      "live",
+      "live_write",
+      "diff",
+      "llm"
+    ],
+    "endpoint_pass": 73,
+    "endpoint_fail": 12,
+    "endpoint_total": 85,
+    "error": 24,
+    "warning": 48,
+    "info": 132
   }
 ]

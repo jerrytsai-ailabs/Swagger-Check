@@ -2,9 +2,9 @@
 
 > 這份檔案由 `run_check.py` 每次執行自動覆寫，請勿手動編輯。完整細節請看同一次執行產生的 `reports/FedGPT-API-Review-*.html`。
 
-- 最後更新：2026-10-12 14:23:53 +0800
+- 最後更新：2026-10-13 09:35:43 +0800
 - 來源：https://fedgpt-stg2-vm1.corp.ailabs.tw/swagger/
-- 這次跑的階段：靜態比對、Live GET、Live 寫入、LLM 審查
+- 這次跑的階段：靜態比對、Live GET、Live 寫入、Spec diff、LLM 審查
 
 | 整體結果 | Pass | Fail | Endpoint 總數 | Pass 率 |
 |---|---|---|---|---|
@@ -12,12 +12,13 @@
 
 | 總發現數 | Error | Warning | Info | 無發現的分頁 |
 |---|---|---|---|---|
-| 191 | 21 | 48 | 122 | 0/10 |
+| 204 | 24 | 48 | 132 | 0/10 |
 
 ## 執行歷史
 
 | 時間 | 環境 | live-write | Pass 率 | Pass/總數 | Error | Warning | Info |
 |---|---|---|---|---|---|---|---|
+| 2026-10-13 09:35:43 +0800 | stg2-vm1 | ✓ | 85.9% | 73/85 | 24 | 48 | 132 |
 | 2026-10-12 14:23:53 +0800 | stg2-vm1 | ✓ | 85.9% | 73/85 | 21 | 48 | 122 |
 | 2026-10-12 09:34:54 +0800 | stg2-vm1 | ✓ | 82.4% | 70/85 | 40 | 49 | 121 |
 | 2026-10-08 09:34:20 +0800 | stg2-vm1 | ✓ | 78.8% | 67/85 | 44 | 52 | 117 |
@@ -39,23 +40,23 @@
 |---|---|---|
 | Common | `0.yaml` | 說明用分頁 |
 | SSE 串流 | `sse.yaml` | 說明用分頁 |
-| Admin V1 | `admin-v1.yaml` | 4 個發現 |
-| Asset V2 | `asset-v2.yaml` | 9 個發現 |
-| Asura V1 | `asura-v1.yaml` | 18 個發現 |
-| Auth V2 | `auth-v2.yaml` | 12 個發現 |
-| Chat V2 | `chat-v2.yaml` | 46 個發現 |
-| FAQ V1 | `faq-v1.yaml` | 14 個發現 |
-| FedFlow V1 | `fedflow-v1.yaml` | 44 個發現 |
-| Helix V1 | `helix-v1.yaml` | 12 個發現 |
-| Knowledge V3 | `knowledge-v3.yaml` | 17 個發現 |
-| OpenAI V1 | `openai-v1.yaml` | 15 個發現 |
+| Admin V1 | `admin-v1.yaml` | 5 個發現 |
+| Asset V2 | `asset-v2.yaml` | 10 個發現 |
+| Asura V1 | `asura-v1.yaml` | 19 個發現 |
+| Auth V2 | `auth-v2.yaml` | 13 個發現 |
+| Chat V2 | `chat-v2.yaml` | 50 個發現 |
+| FAQ V1 | `faq-v1.yaml` | 15 個發現 |
+| FedFlow V1 | `fedflow-v1.yaml` | 45 個發現 |
+| Helix V1 | `helix-v1.yaml` | 13 個發現 |
+| Knowledge V3 | `knowledge-v3.yaml` | 18 個發現 |
+| OpenAI V1 | `openai-v1.yaml` | 16 個發現 |
 
-## Error（21 筆，依根因合併）
+## Error（24 筆，依根因合併）
 
 | 階段 | 分頁 | Endpoint | 位置 | 問題 | 規則 | 筆數 |
 |---|---|---|---|---|---|---|
 | Live GET | Chat V2 | GET `/api/public/chat/v2/faqs` | `responses.200.faqs.N` | 實際回應在 faqs.N 不符合 spec 宣告的 schema：'description' is a required property | `response_schema_mismatch` | 5 |
-| Live GET | Chat V2 | GET `/api/public/chat/v2/conversations/{convId}/messages` | `responses.200.messages.N.humanInLoop` | 實際回應在 messages.N.humanInLoop 不符合 spec 宣告的 schema：None is not of type 'object' | `response_schema_mismatch` | 2 |
+| Live GET | Chat V2 | GET `/api/public/chat/v2/conversations/{convId}/messages` | `responses.200.flowMessages.items.N.sseEvents.N.content.role` | 實際回應在 flowMessages.items.N.sseEvents.N.content.role 不符合 spec 宣告的 schema：'' is not one of ['user', 'assistant', 'tool', 'system'] | `response_schema_mismatch` | 5 |
 | Live 寫入 | Knowledge V3 | DELETE `/api/public/knowledge/v3/knowledges/{knowledgeId}` | — | 實際回傳 423，但 spec 裡這支 endpoint 沒有宣告這個狀態碼（宣告的有：['200', '403', '404']）。回應內容：{"service":"grpc-knowledge","reason":"data.locked","message":"cannot delete kb with 1 documents; delete them first"}（X-Request-Id: <id>） | `undocumented_status_code` | 1 |
 | Live 寫入 | Helix V1 | POST `/api/public/helix/v1/voices` | — | 實際回傳 502，但 spec 裡這支 endpoint 沒有宣告這個狀態碼（宣告的有：['200', '400']）。回應內容：{"service":"","reason":"","message":"502: {\"detail\":{\"error\":\"AUDIO_FETCH_FAILED\",\"message\":\"audio_uri must be an absolute path or http(s) URL, got: 'tmp/<id>'\"}}"}（X-Request-Id: <id>） | `undocumented_status_code` | 1 |
 | Live 寫入 | Chat V2 | POST `/api/public/chat/v2/chat/normal` | `messages.N.humanInLoop` | 實際回應在 messages.N.humanInLoop 不符合 spec 宣告的 schema：None is not of type 'object' | `response_schema_mismatch` | 1 |
@@ -125,6 +126,7 @@
 
 | 規則 | 筆數 |
 |---|---|
+| `diff_baseline_cross_version` | 10 |
 | `live_write_ok` | 24 |
 | `live_write_permanent_residue` | 11 |
 | `live_write_skipped` | 2 |
