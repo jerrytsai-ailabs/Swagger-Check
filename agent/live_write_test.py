@@ -1907,12 +1907,56 @@ def _run_chat_mode_test(entries, api_base_url, token, timeout, *, mode, chat_pat
     return findings
 
 
+# knowledge / agentic-rag 的一般版與串流版共 4 組 chat 測試都需要一個「有索引好文件」的知識庫，
+# 準備（上傳文件、等索引）加清理（刪文件、等它真的消失）每次要 30 秒以上，聊天本身只要 1 秒左右。
+# run_check 在寫入測試前後呼叫 begin_shared_knowledge()/end_shared_knowledge()，讓 4 組共用同一個；
+# 知識庫本身的建立／索引／刪除流程由 run_knowledge_document_crud_test 完整測試，不受影響。
+_shared_knowledge = None
+
+
+def begin_shared_knowledge():
+    """寫入測試開始前呼叫：之後 _prepare_knowledge_params 第一次被呼叫時建立知識庫，後面的測試直接共用。"""
+    global _shared_knowledge
+    _shared_knowledge = {"prepared": False, "params": None, "cleanup": None, "findings": []}
+
+
+def end_shared_knowledge():
+    """寫入測試全部跑完後呼叫（run_check 用 finally 保證一定會呼叫）：清掉共用的知識庫，回傳清理過程產生的 findings。"""
+    global _shared_knowledge
+    state, _shared_knowledge = _shared_knowledge, None
+    if not state or not state["cleanup"]:
+        return []
+    start = len(state["findings"])
+    state["cleanup"]()
+    return state["findings"][start:]
+
+
 def _prepare_knowledge_params(session, base, timeout, findings):
-    """為 chat/knowledge 與 chat/agenticRag 建立一個臨時知識庫，回傳 (params, cleanup_fn)。"""
+    """為 chat/knowledge 與 chat/agenticRag 準備知識庫，回傳 (params, cleanup_fn)。
+
+    在 begin_shared_knowledge() 之後呼叫時：第一次建立、之後共用，清理交給 end_shared_knowledge()。
+    沒有開共用時（例如單獨呼叫某一組測試）跟以前一樣每次各建一個、測完就清。
+    """
+    state = _shared_knowledge
+    if state is None:
+        return _create_knowledge_params(session, base, timeout, findings)
+    if not state["prepared"]:
+        state["prepared"] = True
+        state["params"], state["cleanup"] = _create_knowledge_params(session, base, timeout, state["findings"])
+        findings.extend(state["findings"])  # 建立過程的發現記在第一個用到的測試底下，跟以前一樣
+    elif state["params"] is None:
+        findings.append(
+            _finding("live_write_skipped", "info", "chat-v2.yaml", "Chat V2", "共用的測試知識庫在前面的測試就建立失敗了（原因見該測試的發現），跳過這組測試")
+        )
+    return state["params"], (lambda: None)
+
+
+def _create_knowledge_params(session, base, timeout, findings):
+    """建立一個臨時知識庫並上傳一份文件、等索引完成，回傳 (params, cleanup_fn)。"""
     knowledges_path = "/api/public/knowledge/v3/knowledges"
     filename, group = "chat-v2.yaml", "Chat V2"
 
-    # 名稱要每次呼叫都不同：這個 helper 會被 knowledge/agentic-rag 的一般版與串流版共 4 個測試各呼叫一次，
+    # 名稱要每次呼叫都不同：沒開共用時這個 helper 會被 knowledge/agentic-rag 的一般版與串流版共 4 個測試各呼叫一次，
     # 如果用固定名稱，一旦前一次建立的知識庫卡在索引中沒被清乾淨（stg2-vm1 曾發生過），
     # 後面幾次用同名字建立就會撞到 409 conflict，連帶讓其他測試也跳過。
     knowledge_name = TEST_TITLE + f"（chat mode 測試用 {uuid.uuid4().hex[:8]}）"

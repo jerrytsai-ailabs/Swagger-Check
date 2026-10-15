@@ -38,6 +38,8 @@ from agent.confluence_report import update_confluence_report
 from agent.fetch import fetch_specs, load_local_specs
 from agent.live_call import check_token_valid, run_live_get_checks
 from agent.live_write_test import (
+    begin_shared_knowledge,
+    end_shared_knowledge,
     run_admin_apikey_crud_test,
     run_asura_neartime_token_test,
     run_asura_speech_zero_shot_test,
@@ -180,42 +182,49 @@ def main():
         api_base_url = args.api_base_url or derive_api_base_url(args.base_url)
         print(f"執行寫入方法測試（POST/PUT/DELETE）against {api_base_url} ...")
         phase_start = time.perf_counter()
-        for run_test in (
-            run_conversation_crud_test,
-            run_faq_crud_test,
-            run_faq_entry_crud_test,
-            run_knowledge_crud_test,
-            run_knowledge_document_crud_test,
-            run_fedflow_execute_test,
-            run_helix_voice_crud_test,
-            run_auth_apikey_crud_test,
-            run_llm_embeddings_test,
-            run_asura_tts_test,
-            run_chat_send_message_test,
-            run_chat_knowledge_mode_test,
-            run_chat_agentic_rag_mode_test,
-            run_chat_faq_mode_test,
-            run_chat_tabular_mode_test,
-            run_admin_apikey_crud_test,
-            run_asura_transcription_test,
-            run_asura_neartime_token_test,
-            run_chat_normal_stream_test,
-            run_chat_knowledge_stream_test,
-            run_chat_agentic_rag_stream_test,
-            run_chat_faq_stream_test,
-            run_chat_tabular_stream_test,
-            run_llm_visual_completions_test,
-            run_helix_enrollment_test,
-            run_asura_speech_zero_shot_test,
-            run_helix_voice_search_by_audio_test,
-            run_llm_chat_completions_test,
-            run_auth_login_logout_test,
-            run_auth_ldap_login_test,
-        ):
-            test_start = time.perf_counter()
-            write_findings = run_test(entries, api_base_url, args.token)
-            print(f"  - {run_test.__name__}{_took(test_start)}")
-            findings.extend(write_findings)
+        # knowledge / agentic-rag 的 chat 測試共用同一個臨時知識庫，全部跑完再清理（中途出錯也一定會清）
+        begin_shared_knowledge()
+        try:
+            for run_test in (
+                run_conversation_crud_test,
+                run_faq_crud_test,
+                run_faq_entry_crud_test,
+                run_knowledge_crud_test,
+                run_knowledge_document_crud_test,
+                run_fedflow_execute_test,
+                run_helix_voice_crud_test,
+                run_auth_apikey_crud_test,
+                run_llm_embeddings_test,
+                run_asura_tts_test,
+                run_chat_send_message_test,
+                run_chat_knowledge_mode_test,
+                run_chat_agentic_rag_mode_test,
+                run_chat_faq_mode_test,
+                run_chat_tabular_mode_test,
+                run_admin_apikey_crud_test,
+                run_asura_transcription_test,
+                run_asura_neartime_token_test,
+                run_chat_normal_stream_test,
+                run_chat_knowledge_stream_test,
+                run_chat_agentic_rag_stream_test,
+                run_chat_faq_stream_test,
+                run_chat_tabular_stream_test,
+                run_llm_visual_completions_test,
+                run_helix_enrollment_test,
+                run_asura_speech_zero_shot_test,
+                run_helix_voice_search_by_audio_test,
+                run_llm_chat_completions_test,
+                run_auth_login_logout_test,
+                run_auth_ldap_login_test,
+            ):
+                test_start = time.perf_counter()
+                write_findings = run_test(entries, api_base_url, args.token)
+                print(f"  - {run_test.__name__}{_took(test_start)}")
+                findings.extend(write_findings)
+        finally:
+            cleanup_start = time.perf_counter()
+            findings.extend(end_shared_knowledge())
+            print(f"  - 清理共用的測試知識庫{_took(cleanup_start)}")
         print(f"寫入方法測試共 {sum(1 for f in findings if f.get('phase') == 'live_write')} 筆發現{_took(phase_start)}")
 
     os.makedirs(args.output_dir, exist_ok=True)
