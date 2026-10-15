@@ -37,6 +37,13 @@ from agent.config import (
 from agent.confluence_report import update_confluence_report
 from agent.fetch import fetch_specs, load_local_specs
 from agent.live_call import check_token_valid, run_live_get_checks
+from agent.behavior_test import (
+    run_asura_speech_behavior_test,
+    run_embeddings_behavior_test,
+    run_openai_speech_behavior_test,
+    run_openai_transcription_behavior_test,
+    run_pagination_behavior_test,
+)
 from agent.live_write_test import (
     begin_shared_knowledge,
     end_shared_knowledge,
@@ -224,6 +231,12 @@ def main():
                 run_openai_transcription_test,
                 run_fedflow_execute_stream_test,
                 run_auth_apikey_self_delete_test,
+                # 參數行為規則（agent/behavior_test.py）：無狀態或只讀，不動資料
+                run_openai_speech_behavior_test,
+                run_openai_transcription_behavior_test,
+                run_embeddings_behavior_test,
+                run_asura_speech_behavior_test,
+                run_pagination_behavior_test,
             ):
                 test_start = time.perf_counter()
                 write_findings = run_test(entries, api_base_url, args.token)
