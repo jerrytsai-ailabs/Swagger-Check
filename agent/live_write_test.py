@@ -3685,3 +3685,363 @@ def run_auth_ldap_login_test(entries, api_base_url, token, timeout=30):
     _finalize_ok(findings, filename, group, "LDAP 登入成功並已登出清除，測試通過")
 
     return findings
+
+
+def _check_content_type(op, resp, findings, file, group, path, method):
+    """實際的 Content-Type 有沒有在 spec 這個狀態碼的 `content` 裡宣告過。
+
+    `_check_status_and_schema` 只驗 JSON body，回應是音訊／純文字／SSE 的端點，格式錯了它看不出來
+    （例如 spec 寫預設回 wav、實際回 mp3）。只比對 media type 本身，`; charset=...` 這類參數忽略。
+    沒宣告任何 content 的狀態碼不檢查。回傳 True 代表一致或不需檢查。
+    """
+    resp_spec = (op.get("responses") or {}).get(str(resp.status_code)) or {}
+    declared = list((resp_spec.get("content") or {}).keys())
+    if not declared:
+        return True
+    actual = (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+    if actual in (d.lower() for d in declared):
+        return True
+    findings.append(
+        _finding(
+            "response_content_type_mismatch",
+            "error",
+            file,
+            group,
+            f"實際回傳 {resp.status_code} 的 Content-Type 是 {actual or '（沒有帶）'}，但 spec 這個狀態碼宣告的只有：{declared}",
+            path=path,
+            method=method,
+        )
+    )
+    return False
+
+
+OPENAI_TTS_TEST_MODEL = "tts-general-1.3.3"
+OPENAI_TTS_TEST_INPUT = "[agent-test] This is a speech synthesis check."
+
+
+def run_openai_speech_test(entries, api_base_url, token, timeout=60):
+    """測試 OpenAI V1 的語音合成（`POST /llm/v1/fedgpt/v1/audio/speech`）。
+
+    只帶必填的 model / input / voice，其他都不給，等於驗證預設值：spec 寫省略 `response_format`
+    時回 `audio/wav`（RIFF header ＋ PCM）。無狀態呼叫，不需要清理。
+    """
+    findings = []
+    filename, group = "openai-v1.yaml", "OpenAI V1"
+    spec, paths = _load_spec_for_test(entries, filename, group, findings)
+    if spec is None:
+        return findings
+    speech_path = "/api/public/llm/v1/fedgpt/v1/audio/speech"
+    if speech_path not in paths:
+        findings.append(_finding("live_write_skipped", "info", filename, group, "這個環境的 spec 沒有 audio/speech，跳過這組測試", path=speech_path, method="POST"))
+        return findings
+    op = _make_op_of(spec, paths)(speech_path, "post")
+
+    session = _make_session(token)
+    base = api_base_url.rstrip("/")
+    try:
+        resp = session.post(
+            f"{base}{speech_path}",
+            json={"model": OPENAI_TTS_TEST_MODEL, "input": OPENAI_TTS_TEST_INPUT, "voice": "yating"},
+            timeout=timeout,
+        )
+    except requests.RequestException as exc:
+        findings.append(_finding("live_write_error", "error", filename, group, f"POST audio/speech 失敗：{exc}", path=speech_path, method="POST"))
+        return findings
+
+    if _is_permission_denied(resp):
+        findings.append(_finding("live_write_skipped", "info", filename, group, f"測試帳號沒有呼叫語音合成的權限（{resp.status_code}），跳過這組測試", path=speech_path, method="POST"))
+        return findings
+
+    ok = _check_status_and_schema(op, resp, findings, filename, group, speech_path, "post")
+    if not ok or resp.status_code != 200:
+        findings.append(_finding("live_write_aborted", "error", filename, group, f"POST audio/speech 沒有回 200（實際 {resp.status_code}），中止測試。{_response_excerpt(resp)}", path=speech_path, method="POST"))
+        return findings
+
+    _check_content_type(op, resp, findings, filename, group, speech_path, "post")
+    content_type = (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+    audio = resp.content
+    request_id = resp.headers.get("X-Request-Id")
+    if not audio:
+        findings.append(_finding("live_write_data_mismatch", "error", filename, group, "回 200 但音訊內容是空的", path=speech_path, method="POST"))
+    elif content_type != "audio/wav" or audio[:4] != b"RIFF":
+        findings.append(
+            _finding(
+                "live_write_data_mismatch",
+                "error",
+                filename,
+                group,
+                f"沒帶 response_format 時 spec 寫預設回 wav（audio/wav、RIFF header），實際 Content-Type 是 {content_type or '（沒有帶）'}、"
+                f"開頭 4 bytes 是 {audio[:4]!r}（{len(audio)} bytes）" + (f"（X-Request-Id: {request_id}）" if request_id else ""),
+                path=speech_path,
+                method="POST",
+                location="requestBody.response_format.default",
+            )
+        )
+
+    _finalize_ok(findings, filename, group, f"語音合成呼叫成功，預設回 wav（{len(audio)} bytes）")
+    return findings
+
+
+def run_openai_transcription_test(entries, api_base_url, token, timeout=120):
+    """測試 OpenAI V1 的音訊轉錄（`POST /llm/v1/fedgpt/v1/audio/transcriptions`）。
+
+    上傳 test-data 裡的 Harvard 句子英文音檔（跟 Helix／Asura 測試共用），預設 response_format=json，
+    驗證回應符合 `Transcription` schema、逐字稿裡聽得出內容。spec 寫這支沒有回應總時限，timeout 放寬。
+    無狀態呼叫，不需要清理。
+    """
+    from .config import HELIX_TEST_AUDIO_PATH
+
+    findings = []
+    filename, group = "openai-v1.yaml", "OpenAI V1"
+    spec, paths = _load_spec_for_test(entries, filename, group, findings)
+    if spec is None:
+        return findings
+    transcription_path = "/api/public/llm/v1/fedgpt/v1/audio/transcriptions"
+    if transcription_path not in paths:
+        findings.append(_finding("live_write_skipped", "info", filename, group, "這個環境的 spec 沒有 audio/transcriptions，跳過這組測試", path=transcription_path, method="POST"))
+        return findings
+    if not os.path.exists(HELIX_TEST_AUDIO_PATH):
+        findings.append(_finding("live_write_skipped", "info", filename, group, f"找不到測試音檔 {HELIX_TEST_AUDIO_PATH}，跳過這組測試", path=transcription_path, method="POST"))
+        return findings
+    op = _make_op_of(spec, paths)(transcription_path, "post")
+
+    # multipart 要讓 requests 自己帶 boundary，不能用 _make_session 預設的 JSON Content-Type
+    session = requests.Session()
+    session.headers.update({"X-Access-Token": token})
+    base = api_base_url.rstrip("/")
+    audio_name = os.path.basename(HELIX_TEST_AUDIO_PATH)
+    audio_type = mimetypes.guess_type(audio_name)[0] or "application/octet-stream"
+    try:
+        with open(HELIX_TEST_AUDIO_PATH, "rb") as fh:
+            resp = session.post(
+                f"{base}{transcription_path}",
+                data={"model": ASR_TEST_MODEL, "language": "en"},
+                files={"file": (audio_name, fh, audio_type)},
+                timeout=timeout,
+            )
+    except requests.RequestException as exc:
+        findings.append(_finding("live_write_error", "error", filename, group, f"POST audio/transcriptions 失敗：{exc}", path=transcription_path, method="POST"))
+        return findings
+
+    if _is_permission_denied(resp):
+        findings.append(_finding("live_write_skipped", "info", filename, group, f"測試帳號沒有呼叫音訊轉錄的權限（{resp.status_code}），跳過這組測試", path=transcription_path, method="POST"))
+        return findings
+
+    ok = _check_status_and_schema(op, resp, findings, filename, group, transcription_path, "post")
+    if not ok or resp.status_code != 200:
+        findings.append(_finding("live_write_aborted", "error", filename, group, f"POST audio/transcriptions 沒有回 200（實際 {resp.status_code}），中止測試。{_response_excerpt(resp)}", path=transcription_path, method="POST"))
+        return findings
+
+    _check_content_type(op, resp, findings, filename, group, transcription_path, "post")
+    try:
+        text = resp.json().get("text") or ""
+    except ValueError:
+        text = ""
+    # 只確認聽得出內容，不比對整句：辨識結果的標點、大小寫會有差異
+    expected_words = ("beer", "heat", "ham", "tacos")
+    if not text.strip():
+        findings.append(_finding("live_write_data_mismatch", "error", filename, group, f"回 200 但逐字稿是空的。{_response_excerpt(resp)}", path=transcription_path, method="POST"))
+    elif not any(w in text.lower() for w in expected_words):
+        findings.append(
+            _finding("live_write_data_mismatch", "warning", filename, group, f"逐字稿裡找不到音檔內容的任何關鍵字（{', '.join(expected_words)}），辨識結果可能不對：{text[:200]}", path=transcription_path, method="POST")
+        )
+
+    _finalize_ok(findings, filename, group, f"音訊轉錄呼叫成功，逐字稿 {len(text)} 字元，內容與音檔相符")
+    return findings
+
+
+def run_fedflow_execute_stream_test(entries, api_base_url, token, timeout=60, flow_id=None):
+    """測試 FedFlow 的 `POST /flows/{flowId}/execute:stream`（SSE 方言 A）。
+
+    跟 run_fedflow_execute_test 用同一個「無副作用」的測試 flow 與輸入，一樣會留下一筆執行紀錄、
+    一樣在找不到 flow（404）的環境跳過。驗證串流第一則帶 executionId、整段沒有 `event: error`，
+    最後再用 GET result 確認這次執行真的是 FINISHED。
+    """
+    from .config import FEDFLOW_TEST_FLOW_ID
+
+    findings = []
+    filename, group = "fedflow-v1.yaml", "FedFlow V1"
+    flow_id = flow_id or FEDFLOW_TEST_FLOW_ID
+
+    spec, paths = _load_spec_for_test(entries, filename, group, findings)
+    if spec is None:
+        return findings
+    stream_path_template = "/api/public/fedflow/v1/flows/{flowId}/execute:stream"
+    result_path_template = "/api/public/fedflow/v1/executions/{executionId}/result"
+    if stream_path_template not in paths:
+        findings.append(_finding("live_write_skipped", "info", filename, group, "這個環境的 spec 沒有 execute:stream，跳過這組測試", path=stream_path_template, method="POST"))
+        return findings
+    op_of = _make_op_of(spec, paths)
+    op = op_of(stream_path_template, "post")
+
+    session = _make_session(token)
+    base = api_base_url.rstrip("/")
+    stream_path = stream_path_template.replace("{flowId}", flow_id)
+
+    try:
+        resp = session.post(f"{base}{stream_path}", json={"input": FEDFLOW_EXECUTE_INPUT}, timeout=timeout, stream=True)
+    except requests.RequestException as exc:
+        findings.append(_finding("live_write_error", "error", filename, group, f"POST execute:stream 失敗：{exc}", path=stream_path_template, method="POST"))
+        return findings
+
+    with resp:
+        if _is_permission_denied(resp):
+            findings.append(_finding("live_write_skipped", "info", filename, group, f"測試帳號沒有這個 flow 的執行權限（{resp.status_code}），跳過這組測試", path=stream_path_template, method="POST"))
+            return findings
+        if resp.status_code == 404:
+            findings.append(
+                _finding("live_write_skipped", "info", filename, group, f"flow_id={flow_id} 在這個環境找不到（404），這個測試 flow 只在特定環境（stg2-vm1）建立，跳過這組測試", path=stream_path_template, method="POST")
+            )
+            return findings
+
+        ok = _check_status_and_schema(op, resp, findings, filename, group, stream_path_template, "post")
+        if not ok or resp.status_code != 200:
+            findings.append(_finding("live_write_aborted", "error", filename, group, f"POST execute:stream 沒有回 200（實際 {resp.status_code}），中止測試。{_response_excerpt(resp)}", path=stream_path_template, method="POST"))
+            return findings
+        _check_content_type(op, resp, findings, filename, group, stream_path_template, "post")
+
+        # 方言 A，但這裡要的是「第一則」data（帶 executionId），_parse_sse_dialect_a 只留最後一則，所以自己逐行讀。
+        # 一樣先用原始 bytes 分行再解碼，理由見 _parse_sse_dialect_a。
+        first_data = None
+        error_event = None
+        pending_event = None
+        try:
+            for raw_bytes in resp.iter_lines():
+                line = (raw_bytes or b"").decode("utf-8", errors="replace").rstrip("\r")
+                if line == "":
+                    pending_event = None
+                elif line.startswith(":"):
+                    continue
+                elif line.startswith("event:"):
+                    pending_event = line[len("event:") :].strip()
+                elif line.startswith("data:"):
+                    try:
+                        payload = json.loads(line[len("data:") :].strip())
+                    except ValueError:
+                        continue
+                    if pending_event == "error":
+                        error_event = payload
+                    elif first_data is None:
+                        first_data = payload
+        except requests.RequestException as exc:
+            findings.append(_finding("live_write_error", "error", filename, group, f"讀取 execute:stream 串流中斷：{exc}", path=stream_path_template, method="POST"))
+            return findings
+
+    if error_event is not None:
+        findings.append(_finding("live_write_error", "error", filename, group, f"串流裡出現 event: error：{error_event}", path=stream_path_template, method="POST"))
+        return findings
+    execution_id = (first_data or {}).get("executionId")
+    if not execution_id:
+        findings.append(_finding("live_write_data_mismatch", "error", filename, group, f"spec 寫第一則事件帶 executionId，實際第一則是：{first_data}", path=stream_path_template, method="POST"))
+        return findings
+
+    real_result_path = result_path_template.replace("{executionId}", execution_id)
+    try:
+        resp = session.get(f"{base}{real_result_path}", timeout=timeout)
+        _check_status_and_schema(op_of(result_path_template, "get"), resp, findings, filename, group, result_path_template, "get")
+        state = resp.json().get("state")
+    except (requests.RequestException, ValueError) as exc:
+        findings.append(_finding("live_write_error", "error", filename, group, f"GET 這次執行的結果失敗：{exc}", path=result_path_template, method="GET"))
+        return findings
+    if state != "FINISHED":
+        findings.append(_finding("live_write_error", "warning", filename, group, f"串流已結束，但 GET result 的 state={state!r}（非 FINISHED），executionId={execution_id}", path=result_path_template, method="GET"))
+        return findings
+
+    _finalize_ok(findings, filename, group, f"POST execute:stream 串流驗證通過，第一則帶 executionId、執行成功結束（executionId={execution_id}）")
+    return findings
+
+
+def run_auth_apikey_self_delete_test(entries, api_base_url, token, timeout=30):
+    """測試 Auth V2 的 `DELETE /apikeys:self`（用 key 自己刪掉自己）。
+
+    流程：用 access token 建一把效期 1 小時的臨時 key → 只帶 access token 呼叫（spec 寫只收
+    X-Api-Key，應該回 401）→ 只帶這把 key 呼叫（應該回 200 `{}`）→ 用 access token 列清單確認它不見了。
+    沒有確認刪掉的話，改用 access token 走 `apikeys:batchDelete` 補刪，不留下有效的 key。
+    key 本身是憑證，訊息裡只印最後 4 碼。
+    """
+    findings = []
+    filename, group = "auth-v2.yaml", "Auth V2"
+    spec, paths = _load_spec_for_test(entries, filename, group, findings)
+    if spec is None:
+        return findings
+    apikeys_path = "/api/public/auth/v2/apikeys"
+    self_path = "/api/public/auth/v2/apikeys:self"
+    batch_delete_path = "/api/public/auth/v2/apikeys:batchDelete"
+    if self_path not in paths:
+        findings.append(_finding("live_write_skipped", "info", filename, group, "這個環境的 spec 沒有 apikeys:self，跳過這組測試", path=self_path, method="DELETE"))
+        return findings
+    self_op = _make_op_of(spec, paths)(self_path, "delete")
+
+    session = _make_session(token)
+    base = api_base_url.rstrip("/")
+
+    # Step 1：建臨時 key
+    expired_at = int(time.time()) + 3600
+    try:
+        resp = session.post(f"{base}{apikeys_path}", json={"number": 1, "expiredAt": expired_at}, timeout=timeout)
+    except requests.RequestException as exc:
+        findings.append(_finding("live_write_error", "error", filename, group, f"POST 建立臨時 API key 失敗：{exc}", path=apikeys_path, method="POST"))
+        return findings
+    if _is_permission_denied(resp):
+        findings.append(_finding("live_write_skipped", "info", filename, group, f"測試帳號沒有建立 API key 的權限（{resp.status_code}），跳過這組測試", path=apikeys_path, method="POST"))
+        return findings
+    if resp.status_code == 400 and "quota-exceeded" in resp.text:
+        findings.append(_finding("live_write_skipped", "info", filename, group, "測試帳號的 API key 數量已達上限（25 把），跳過這組測試", path=apikeys_path, method="POST"))
+        return findings
+    try:
+        created_key = resp.json()["keys"][0] if resp.status_code == 200 else None
+    except Exception:  # noqa: BLE001
+        created_key = None
+    if not created_key:
+        findings.append(_finding("live_write_aborted", "error", filename, group, f"建立臨時 API key 沒有成功（{resp.status_code}），中止測試", path=apikeys_path, method="POST"))
+        return findings
+    key_label = f"…{created_key[-4:]}"
+
+    def key_in_list():
+        r = session.get(f"{base}{apikeys_path}", params={"limit": 100}, timeout=timeout)
+        return any(it.get("key") == created_key for it in (r.json().get("items") or []))
+
+    deleted = False
+    try:
+        # Step 2：只帶 access token——spec 寫只收 X-Api-Key，只帶 access token 回 401
+        resp = session.delete(f"{base}{self_path}", timeout=timeout)
+        _check_status_and_schema(self_op, resp, findings, filename, group, self_path, "delete")
+        if resp.status_code != 401:
+            findings.append(
+                _finding(
+                    "live_write_data_mismatch",
+                    "error",
+                    filename,
+                    group,
+                    f"只帶 access token 呼叫 apikeys:self，spec 寫應該回 401，實際回 {resp.status_code}。{_response_excerpt(resp)}",
+                    path=self_path,
+                    method="DELETE",
+                    location="responses.401",
+                )
+            )
+
+        # Step 3：只帶臨時 key 自己刪自己（不經過 session，才不會順便帶上 access token）
+        resp = requests.delete(f"{base}{self_path}", headers={"X-Api-Key": created_key}, timeout=timeout)
+        _check_status_and_schema(self_op, resp, findings, filename, group, self_path, "delete")
+        if resp.status_code != 200:
+            findings.append(_finding("live_write_error", "error", filename, group, f"帶 X-Api-Key 呼叫 apikeys:self 沒有回 200（實際 {resp.status_code}）。{_response_excerpt(resp)}", path=self_path, method="DELETE"))
+        elif key_in_list():
+            # Step 4：清單裡應該找不到這把 key
+            findings.append(_finding("live_write_data_mismatch", "error", filename, group, f"apikeys:self 回 200，但 GET 清單裡還找得到這把 key（{key_label}）", path=apikeys_path, method="GET"))
+        else:
+            deleted = True
+    except (requests.RequestException, ValueError) as exc:
+        findings.append(_finding("live_write_error", "error", filename, group, f"測試 apikeys:self 時失敗：{exc}", path=self_path, method="DELETE"))
+    finally:
+        if not deleted:
+            try:
+                session.delete(f"{base}{batch_delete_path}", params={"keys": [created_key]}, timeout=timeout)
+                if key_in_list():
+                    raise RuntimeError("批次刪除後清單裡仍找得到這把 key")
+            except Exception as exc:  # noqa: BLE001
+                findings.append(
+                    _finding("live_write_cleanup_failed", "error", filename, group, f"補刪臨時 key（{key_label}）失敗：{exc}，這把 key 一小時後才會過期，需要手動清理", path=batch_delete_path, method="DELETE")
+                )
+
+    _finalize_ok(findings, filename, group, "apikeys:self 驗證通過：只帶 access token 回 401，帶 key 自己刪除回 200，清單裡已經找不到")
+    return findings

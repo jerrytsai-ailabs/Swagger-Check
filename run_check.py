@@ -46,6 +46,7 @@ from agent.live_write_test import (
     run_asura_transcription_test,
     run_asura_tts_test,
     run_auth_apikey_crud_test,
+    run_auth_apikey_self_delete_test,
     run_auth_ldap_login_test,
     run_auth_login_logout_test,
     run_chat_agentic_rag_mode_test,
@@ -61,6 +62,7 @@ from agent.live_write_test import (
     run_conversation_crud_test,
     run_faq_crud_test,
     run_faq_entry_crud_test,
+    run_fedflow_execute_stream_test,
     run_fedflow_execute_test,
     run_helix_enrollment_test,
     run_helix_voice_crud_test,
@@ -70,6 +72,8 @@ from agent.live_write_test import (
     run_llm_chat_completions_test,
     run_llm_embeddings_test,
     run_llm_visual_completions_test,
+    run_openai_speech_test,
+    run_openai_transcription_test,
 )
 from agent.llm_check import run_llm_checks
 from agent.report import _environment_label, render_html
@@ -216,6 +220,10 @@ def main():
                 run_llm_chat_completions_test,
                 run_auth_login_logout_test,
                 run_auth_ldap_login_test,
+                run_openai_speech_test,
+                run_openai_transcription_test,
+                run_fedflow_execute_stream_test,
+                run_auth_apikey_self_delete_test,
             ):
                 test_start = time.perf_counter()
                 write_findings = run_test(entries, api_base_url, args.token)
