@@ -17,6 +17,7 @@
 import argparse
 import os
 import sys
+import time
 from datetime import datetime
 
 from agent.checks import run_all_checks
@@ -75,6 +76,11 @@ from agent.spec_diff import SNAPSHOT_DIR_DEFAULT, run_spec_diff, spec_version
 from agent.teams_notify import build_teams_payload, post_to_teams
 
 
+def _took(start):
+    """「（12.3 秒）」——每個階段結束時印出耗時，排程的 log 也看得到時間花在哪。"""
+    return f"（{time.perf_counter() - start:.1f} 秒）"
+
+
 def main():
     parser = argparse.ArgumentParser(description="Public Swagger 靜態檢查 / live call / 版本間差異")
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help="Swagger docs 目錄的 base URL")
@@ -113,7 +119,9 @@ def main():
         "以及 FedFlow V1 執行一個事先確認無副作用的 flow 並輪詢結果（無法復原、只在 stg2-vm1 有可用的測試 flow）",
     )
     args = parser.parse_args()
+    run_start = time.perf_counter()
 
+    phase_start = time.perf_counter()
     if args.local:
         print(f"[離線模式] 從 {args.local} 讀取 spec ...")
         entries = load_local_specs(args.local)
@@ -126,6 +134,7 @@ def main():
     for e in entries:
         status = f"失敗（{e['error']}）" if e["error"] else "OK"
         print(f"  - {e['group']:12s} {e['filename']:20s} {status}")
+    print(f"抓取 spec 完成{_took(phase_start)}")
 
     if (args.live or args.live_write or args.llm_check) and args.token:
         preflight_base_url = args.api_base_url or derive_api_base_url(args.base_url)
@@ -136,14 +145,16 @@ def main():
             return 1
 
     print("執行靜態檢查規則 ...")
+    phase_start = time.perf_counter()
     findings = run_all_checks(entries)
-    print(f"共 {len(findings)} 筆發現")
+    print(f"共 {len(findings)} 筆發現{_took(phase_start)}")
 
     if args.live:
         api_base_url = args.api_base_url or derive_api_base_url(args.base_url)
         print(f"執行 live call（GET only）against {api_base_url} ...")
+        phase_start = time.perf_counter()
         live_findings = run_live_get_checks(entries, api_base_url, args.token)
-        print(f"live call 共 {len(live_findings)} 筆發現")
+        print(f"live call 共 {len(live_findings)} 筆發現{_took(phase_start)}")
         findings.extend(live_findings)
 
     if not args.no_diff:
@@ -152,20 +163,23 @@ def main():
             print(f"目前版本 {current_version}，強制跟指定版本 {args.diff_against} 比對 spec 差異（{args.snapshot_dir}）...")
         else:
             print(f"目前版本 {current_version}，比對 spec 差異（{args.snapshot_dir}）...")
+        phase_start = time.perf_counter()
         diff_findings = run_spec_diff(entries, args.snapshot_dir, diff_against=args.diff_against)
-        print(f"spec diff 共 {len(diff_findings)} 筆發現")
+        print(f"spec diff 共 {len(diff_findings)} 筆發現{_took(phase_start)}")
         findings.extend(diff_findings)
 
     if args.llm_check:
         api_base_url = args.api_base_url or derive_api_base_url(args.base_url)
         print(f"執行 LLM 文字審查 against {api_base_url} ...（每支 endpoint 一次呼叫，可能要等一下）")
+        phase_start = time.perf_counter()
         llm_findings = run_llm_checks(entries, api_base_url, args.token)
-        print(f"LLM 審查共 {len(llm_findings)} 筆發現")
+        print(f"LLM 審查共 {len(llm_findings)} 筆發現{_took(phase_start)}")
         findings.extend(llm_findings)
 
     if args.live_write:
         api_base_url = args.api_base_url or derive_api_base_url(args.base_url)
         print(f"執行寫入方法測試（POST/PUT/DELETE）against {api_base_url} ...")
+        phase_start = time.perf_counter()
         for run_test in (
             run_conversation_crud_test,
             run_faq_crud_test,
@@ -198,9 +212,11 @@ def main():
             run_auth_login_logout_test,
             run_auth_ldap_login_test,
         ):
+            test_start = time.perf_counter()
             write_findings = run_test(entries, api_base_url, args.token)
+            print(f"  - {run_test.__name__}{_took(test_start)}")
             findings.extend(write_findings)
-        print(f"寫入方法測試共 {sum(1 for f in findings if f.get('phase') == 'live_write')} 筆發現")
+        print(f"寫入方法測試共 {sum(1 for f in findings if f.get('phase') == 'live_write')} 筆發現{_took(phase_start)}")
 
     os.makedirs(args.output_dir, exist_ok=True)
     # 檔名 FedGPT-API-Review-<環境>-yyyy-mm-dd.html，方便直接分享；同一天跑第二次以上時加上時分秒，
@@ -248,6 +264,7 @@ def main():
             print(f"推播到 Microsoft Teams 失敗：{exc}", file=sys.stderr)
             ok = False
 
+    print(f"全部完成{_took(run_start)}")
     return 0 if ok else 1
 
 

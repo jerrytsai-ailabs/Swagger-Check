@@ -11,31 +11,35 @@ def fetch_specs(base_url):
 
     回傳 list of dict: {group, filename, is_real, spec, raw_text, error}
     抓取或解析失敗時該筆的 spec 為 None、error 帶上錯誤訊息，其餘筆不受影響。
+    共用同一個 Session（keep-alive）：實測時間幾乎都花在建立連線，每份都開新連線要 4–5 秒、
+    共用一條只要 0.5 秒；改成同時抓反而更慢（同時建立多條連線會被擋著排隊，6 條要等 6 秒以上）。
     """
-    results = []
-    for group, filename, is_real in SPEC_FILES:
-        url = f"{base_url.rstrip('/')}/{filename}"
-        entry = {
-            "group": group,
-            "filename": filename,
-            "is_real": is_real,
-            "url": url,
-            "spec": None,
-            "raw_text": None,
-            "error": None,
-        }
-        try:
-            resp = requests.get(url, timeout=REQUEST_TIMEOUT_SECONDS)
-            resp.raise_for_status()
-            # 這個站台沒有在 Content-Type 帶 charset，requests 會退回 ISO-8859-1 猜測，
-            # 把多位元組的 UTF-8（中文說明文字）弄壞——一律當 UTF-8 解碼。
-            text = resp.content.decode("utf-8")
-            entry["raw_text"] = text
-            entry["spec"] = yaml.safe_load(text)
-        except Exception as exc:  # noqa: BLE001 - 蒐集所有失敗原因回報，不中斷其他檔案
-            entry["error"] = str(exc)
-        results.append(entry)
-    return results
+    with requests.Session() as session:
+        return [_fetch_one(session, base_url, *spec_file) for spec_file in SPEC_FILES]
+
+
+def _fetch_one(session, base_url, group, filename, is_real):
+    url = f"{base_url.rstrip('/')}/{filename}"
+    entry = {
+        "group": group,
+        "filename": filename,
+        "is_real": is_real,
+        "url": url,
+        "spec": None,
+        "raw_text": None,
+        "error": None,
+    }
+    try:
+        resp = session.get(url, timeout=REQUEST_TIMEOUT_SECONDS)
+        resp.raise_for_status()
+        # 這個站台沒有在 Content-Type 帶 charset，requests 會退回 ISO-8859-1 猜測，
+        # 把多位元組的 UTF-8（中文說明文字）弄壞——一律當 UTF-8 解碼。
+        text = resp.content.decode("utf-8")
+        entry["raw_text"] = text
+        entry["spec"] = yaml.safe_load(text)
+    except Exception as exc:  # noqa: BLE001 - 蒐集所有失敗原因回報，不中斷其他檔案
+        entry["error"] = str(exc)
+    return entry
 
 
 def load_local_specs(spec_dir):

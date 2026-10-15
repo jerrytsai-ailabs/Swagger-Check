@@ -17,6 +17,7 @@ missing_property_description 抓過了，不需要 LLM 重複判斷「有沒有�
 """
 
 import json
+import time
 
 import requests
 
@@ -25,6 +26,10 @@ from .config import HTTP_METHODS, REQUEST_TIMEOUT_SECONDS
 
 MAX_WALK_DEPTH = 6
 LLM_MODEL = "Default"  # 代稱，解到部署當下的預設模型，不用因為換模型改這裡
+# 被限流（429）或上游暫時出錯（502/503/504）時，等一下再重試，而不是直接記成 llm_call_failed
+RETRY_STATUSES = {429, 502, 503, 504}
+MAX_RETRIES = 3
+RETRY_BACKOFF_SECONDS = 2
 
 _SYSTEM_PROMPT = (
     "You are reviewing descriptions from a public REST API's OpenAPI spec, written for API "
@@ -109,22 +114,26 @@ def _collect_operation_descriptions(op, spec):
     return items
 
 
-def _call_llm(api_base_url, token, prompt_items, timeout):
+def _call_llm(session, api_base_url, token, prompt_items, timeout):
     labeled = "\n\n".join(f"[{label}]\n{text}" for label, text in prompt_items)
-    resp = requests.post(
-        f"{api_base_url.rstrip('/')}/api/public/llm/v1/fedgpt/v1/chat/completions",
-        headers={"X-Access-Token": token, "Content-Type": "application/json"},
-        json={
-            "model": LLM_MODEL,
-            "temperature": 0,
-            "response_format": {"type": "json_object"},
-            "messages": [
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": labeled},
-            ],
-        },
-        timeout=timeout,
-    )
+    for attempt in range(MAX_RETRIES + 1):
+        resp = session.post(
+            f"{api_base_url.rstrip('/')}/api/public/llm/v1/fedgpt/v1/chat/completions",
+            headers={"X-Access-Token": token, "Content-Type": "application/json"},
+            json={
+                "model": LLM_MODEL,
+                "temperature": 0,
+                "response_format": {"type": "json_object"},
+                "messages": [
+                    {"role": "system", "content": _SYSTEM_PROMPT},
+                    {"role": "user", "content": labeled},
+                ],
+            },
+            timeout=timeout,
+        )
+        if resp.status_code not in RETRY_STATUSES or attempt == MAX_RETRIES:
+            break
+        time.sleep(RETRY_BACKOFF_SECONDS * (attempt + 1))
     resp.raise_for_status()
     content = resp.json()["choices"][0]["message"]["content"]
     parsed = json.loads(content)
@@ -140,6 +149,9 @@ def run_llm_checks(entries, api_base_url, token, timeout=REQUEST_TIMEOUT_SECONDS
         findings.append(_finding("llm_check_skipped", "info", "-", "-", "沒有設定 FEDGPT_ACCESS_TOKEN，跳過整個 LLM 檢查階段"))
         return findings
 
+    # 共用同一個 Session（keep-alive）：實測每次呼叫只要 0.1–0.4 秒，時間主要花在建立連線——每次開新連線
+    # 約 0.4 秒、共用一條約 0.1 秒。並行反而更慢（同時建立多條連線會被擋著排隊，6 條要等 6 秒左右）。
+    session = requests.Session()
     for entry in entries:
         if not entry.get("is_real") or not entry.get("spec"):
             continue
@@ -154,7 +166,7 @@ def run_llm_checks(entries, api_base_url, token, timeout=REQUEST_TIMEOUT_SECONDS
                 if not prompt_items:
                     continue
                 try:
-                    issues = _call_llm(api_base_url, token, prompt_items, timeout)
+                    issues = _call_llm(session, api_base_url, token, prompt_items, timeout)
                 except Exception as exc:  # noqa: BLE001 - LLM 呼叫/解析失敗要回報，不能讓一支 endpoint 中斷整輪
                     findings.append(
                         _finding(
