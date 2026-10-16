@@ -14,6 +14,7 @@
 import json
 import os
 import re
+import time
 
 import requests
 from jsonschema import Draft202012Validator
@@ -645,4 +646,231 @@ def run_no_token_behavior_test(entries, api_base_url, token, timeout=20):
     for (filename, group), (passed, total) in sorted(by_file.items()):
         if passed == total:
             findings.append(_finding("live_write_ok", "info", filename, group, f"不帶 token 的 {total} 支端點都正確回 401 auth.no-auth"))
+    return findings
+
+
+# ---------------------------------------------------------------- API key scope（受限 key）
+
+APIKEYS_PATH = "/api/public/auth/v2/apikeys"
+APIKEYS_SELF_PATH = "/api/public/auth/v2/apikeys:self"
+APIKEYS_BATCH_DELETE_PATH = "/api/public/auth/v2/apikeys:batchDelete"
+SCOPE_TEST_NOTE = "[agent-test] scope 驗證，測完會刪除"
+# 矩陣裡不打的端點：漏了 scope 檢查的話會真的生效（套件、登出、刪除帳號唯一的聲紋註冊），
+# 或是會把測試用的 key 自己刪掉（apikeys:self，另外單獨驗）
+SCOPE_MATRIX_EXCLUDED = NO_TOKEN_EXCLUDED | {
+    ("DELETE", APIKEYS_SELF_PATH),
+    ("POST", "/api/public/auth/v2/logout"),
+    ("DELETE", "/api/public/helix/v1/enrollment"),
+}
+
+
+def _scopes_for(method, path):
+    """依 ApikeyScope 說明的對照表，回傳哪些 scope 開放這支端點（空集合＝沒有任何 scope 開放）。
+
+    對照表只列 /api/public/ 底下的入口；無前綴的相容路徑（目前只有 /api/fedflow/v1/flows/summary）
+    spec 明寫「不接受任何受限 key」。
+    """
+    if not path.startswith("/api/public/"):
+        return set()
+    if path.startswith("/api/public/llm/v1/"):
+        return {"openai"}
+    if path.startswith("/api/public/knowledge/v3/"):
+        return {"kb:read"} if method == "GET" else {"kb:write"}
+    if path.startswith("/api/public/fedflow/v1/") and "/packages/" not in path:
+        return {"flow:execute"}
+    if method == "POST" and path == "/api/public/asset/v2/assets:presign":
+        return {"asset:upload"}
+    return set()
+
+
+def run_apikey_scope_behavior_test(entries, api_base_url, token, timeout=20):
+    """受限 API key（帶 scopes 建立）的行為：
+
+    1. 建立 key 時 spec 寫明會拒絕的值（scopes 空陣列／重複／不在列舉、note 超過 128 字、expiredAt 的四條規則）
+       都要回 400；萬一後端沒擋、真的建出 key，記下來一起清掉。
+    2. 建 3 把臨時受限 key：A = [openai, kb:read]、B = [kb:write]、C = [flow:execute, asset:upload]（5 種 scope 都涵蓋），確認清單回顯的 scopes／note 跟建立時一致。
+    3. 每把 key 各自把所有需要驗證的端點打一輪（矩陣）：scope 有開放的不能回 403 apikey.scope-forbidden，
+       沒開放的要回 403 apikey.scope-forbidden，message 要寫這支接受哪些 scope（沒有就是 none），body 符合錯誤格式。
+       POST／PUT 一律送空物件、path 參數換成假 ID——scope 沒生效的話最壞也只會拿到 400／404，不會建立資料。
+    4. 開放的端點用正常參數打一次要回 200（含 OpenAI V1 的 Authorization: Bearer 寫法）。
+    5. 用 key 自己呼叫 apikeys:self 刪除，之後同一把 key 立刻失效（401）；沒確認刪掉的用 access token 批次補刪。
+
+    另外靜態比對每支端點 403 說明裡寫的 scope 跟 ApikeyScope 對照表有沒有矛盾。key 是憑證，訊息只印最後 4 碼。
+    """
+    findings = []
+    filename, group = "auth-v2.yaml", "Auth V2"
+    auth_spec, auth_paths = _load_spec_for_test(entries, filename, group, findings)
+    if auth_spec is None or APIKEYS_SELF_PATH not in auth_paths:
+        return findings
+    session = _make_session(token)
+    base = api_base_url.rstrip("/")
+    created = []  # 這個測試建出來的所有 key（含不該建成功卻建成功的），最後統一確認清除
+
+    def label(key):
+        return f"…{key[-4:]}"
+
+    def create_key(**body):
+        payload = {"number": 1, "note": SCOPE_TEST_NOTE, **body}
+        resp = session.post(f"{base}{APIKEYS_PATH}", json=payload, timeout=timeout)
+        keys = []
+        if resp.status_code == 200:
+            try:
+                keys = resp.json().get("keys") or []
+            except ValueError:
+                pass
+            created.extend(keys)
+        return resp, keys
+
+    def key_items():
+        r = session.get(f"{base}{APIKEYS_PATH}", params={"limit": 100}, timeout=timeout)
+        return {it.get("key"): it for it in (r.json().get("items") or [])}
+
+    try:
+        # ---- 1. 建立時的驗證規則
+        now = int(time.time())
+        create_rules = [
+            ("scopes 不能是空陣列", {"expiredAt": now + 3600, "scopes": []}, "data.validation"),
+            ("scopes 不能有重複值", {"expiredAt": now + 3600, "scopes": ["kb:read", "kb:read"]}, "data.validation"),
+            ("scopes 不能有不在列舉內的值", {"expiredAt": now + 3600, "scopes": ["agent-test:unknown"]}, "data.validation"),
+            ("note 最多 128 字", {"expiredAt": now + 3600, "note": "a" * 129}, "data.validation"),
+            ("expiredAt 必填", {}, "apikey.expiry-invalid"),
+            ("expiredAt 不能是過去的時間", {"expiredAt": now - 60}, "apikey.expiry-invalid"),
+            ("expiredAt 不能超過現在起算約一年", {"expiredAt": now + 400 * 86400}, "apikey.expiry-invalid"),
+            ("expiredAt 填 0 不代表永不過期，會被當成沒填而拒絕", {"expiredAt": 0}, "apikey.expiry-invalid"),
+        ]
+        for rule, body, reason in create_rules:
+            resp, keys = create_key(**body)
+            if resp.status_code == 400 and "quota-exceeded" in resp.text:
+                findings.append(_finding("live_write_skipped", "info", filename, group, "測試帳號的 API key 數量已達上限（25 把），跳過 scope 測試", path=APIKEYS_PATH, method="POST"))
+                return findings
+            if resp.status_code != 400 or _reason(resp) != reason:
+                extra = f"，建出了 {len(keys)} 把 key（會在測試結束時刪除）" if keys else ""
+                findings.append(
+                    _finding("spec_behavior_mismatch", "error", filename, group, f"{rule}，應回 400 {reason}——實際回 {resp.status_code}（reason={_reason(resp)!r}）{extra}。{_request_id_note(resp)}", path=APIKEYS_PATH, method="POST", location="requestBody")
+                )
+
+        # ---- 2. 建兩把受限 key
+        scope_sets = {"A": ["openai", "kb:read"], "B": ["kb:write"], "C": ["flow:execute", "asset:upload"]}
+        keys = {}
+        for name, scopes in scope_sets.items():
+            resp, new_keys = create_key(expiredAt=now + 3600, scopes=scopes)
+            if resp.status_code == 400 and "quota-exceeded" in resp.text:
+                findings.append(_finding("live_write_skipped", "info", filename, group, "測試帳號的 API key 數量已達上限（25 把），跳過 scope 測試", path=APIKEYS_PATH, method="POST"))
+                return findings
+            if resp.status_code != 200 or not new_keys:
+                findings.append(_finding("live_write_aborted", "error", filename, group, f"建立受限 key（scopes={scopes}）沒有成功（{resp.status_code}），中止 scope 測試。{_request_id_note(resp)}", path=APIKEYS_PATH, method="POST"))
+                return findings
+            keys[name] = new_keys[0]
+        items = key_items()
+        for name, scopes in scope_sets.items():
+            item = items.get(keys[name]) or {}
+            if sorted(item.get("scopes") or []) != sorted(scopes) or item.get("note") != SCOPE_TEST_NOTE:
+                findings.append(
+                    _finding("spec_behavior_mismatch", "error", filename, group, f"清單裡 key {label(keys[name])} 的 scopes={item.get('scopes')!r}、note={item.get('note')!r}，跟建立時送的 scopes={scopes}、note 不一致", path=APIKEYS_PATH, method="GET")
+                )
+
+        # ---- 3. 矩陣：每把 key 打一輪所有需要驗證的端點
+        scope_session = requests.Session()  # 不帶 access token，只用 X-Api-Key
+        stats = {name: [0, 0] for name in scope_sets}
+        for entry in entries:
+            spec = entry.get("spec")
+            if not entry.get("is_real") or not spec:
+                continue
+            efile, egroup = entry["filename"], entry["group"]
+            global_security = spec.get("security")
+            error_schema = ((spec.get("components") or {}).get("schemas") or {}).get("Error")
+            for path, item in (spec.get("paths") or {}).items():
+                for method, op in item.items():
+                    method_upper = method.upper()
+                    if not isinstance(op, dict) or method_upper not in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
+                        continue
+                    security = op.get("security", global_security)
+                    if not security or security == [{}] or (method_upper, path) in SCOPE_MATRIX_EXCLUDED:
+                        continue
+                    allowed_by = _scopes_for(method_upper, path)
+                    resp_403 = (op.get("responses") or {}).get("403") or {}
+                    # 靜態：這支 403 說明裡寫的 scope 跟對照表矛盾的話記下來（說明沒提 scope 的不算，Common 分頁有統一寫）
+                    doc_scopes = set(re.findall(r"`([a-z]+:[a-z-]+|openai)`", resp_403.get("description") or "")) & {"openai", "kb:read", "kb:write", "flow:execute", "asset:upload"}
+                    # 無前綴路徑的 403 說明會順帶提到「帶 /public 的那條要 flow:execute」，不拿來比
+                    if doc_scopes and doc_scopes != allowed_by and path.startswith("/api/public/"):
+                        findings.append(
+                            _finding("spec_description_mismatch", "warning", efile, egroup, f"這支的 403 說明寫需要 {sorted(doc_scopes)}，但 ApikeyScope 對照表推出來是 {sorted(allowed_by) or '沒有任何 scope'}", path=path, method=method_upper, location="responses.403")
+                        )
+                    real_path = re.sub(r"\{[^}]+\}", NO_TOKEN_FAKE_ID, path)
+                    for name, scopes in scope_sets.items():
+                        stats[name][1] += 1
+                        should_allow = bool(allowed_by & set(scopes))
+                        kwargs = {"json": {}} if method_upper in ("POST", "PUT", "PATCH") else {}
+                        try:
+                            resp = scope_session.request(method_upper, f"{base}{real_path}", headers={"X-Api-Key": keys[name]}, timeout=timeout, allow_redirects=False, **kwargs)
+                        except requests.RequestException as exc:
+                            findings.append(_finding("live_write_error", "error", efile, egroup, f"用受限 key {name} 呼叫失敗：{exc}", path=path, method=method_upper))
+                            continue
+                        blocked = resp.status_code == 403 and _reason(resp) == "apikey.scope-forbidden"
+                        problem = None
+                        if should_allow and blocked:
+                            problem = f"key {name}（scopes={scopes}）有開放這支（{sorted(allowed_by)}），卻回 403 apikey.scope-forbidden"
+                        elif not should_allow and not blocked:
+                            problem = f"key {name}（scopes={scopes}）沒有開放這支（需要 {sorted(allowed_by) or '沒有任何 scope 開放'}），應回 403 apikey.scope-forbidden，實際回 {resp.status_code}（reason={_reason(resp)!r}）"
+                        elif blocked:
+                            try:
+                                body = resp.json()
+                            except ValueError:
+                                body = {}
+                            message = body.get("message") or ""
+                            wanted = sorted(allowed_by) or ["none"]
+                            if not all(w in message for w in wanted):
+                                problem = f"回 403 apikey.scope-forbidden，但 message 沒寫這支接受的 scope（應提到 {', '.join(wanted)}）：{message[:120]!r}"
+                            else:
+                                schema = ((((resp_403.get("content") or {}).get("application/json")) or {}).get("schema")) or error_schema
+                                errors = list(Draft202012Validator(_deref_schema(schema, spec)).iter_errors(body)) if schema else []
+                                if errors:
+                                    problem = f"回 403，但 body 不符合錯誤格式的 schema：{_shorten_schema_message(errors[0].message, 150)}"
+                        if problem:
+                            findings.append(
+                                _finding("spec_behavior_mismatch", "error", efile, egroup, f"{problem}。{_response_excerpt(resp)}", path=path, method=method_upper, location="security / ApikeyScope")
+                            )
+                        else:
+                            stats[name][0] += 1
+
+        # ---- 4. 開放的端點用正常參數要回 200（含 Bearer 寫法）
+        positive = [
+            ("key A（kb:read）列出知識庫", "/api/public/knowledge/v3/knowledges", {"X-Api-Key": keys["A"]}, {"limit": 1}),
+            ("key A（openai）列出模型", "/api/public/llm/v1/fedgpt/v1/models", {"X-Api-Key": keys["A"]}, {}),
+            ("key A 改用 Authorization: Bearer 列出模型", "/api/public/llm/v1/fedgpt/v1/models", {"Authorization": f"Bearer {keys['A']}"}, {}),
+            ("key C（flow:execute）列出 flow", "/api/public/fedflow/v1/flows/summary", {"X-Api-Key": keys["C"]}, {}),
+        ]
+        for rule, path, headers, params in positive:
+            resp = scope_session.get(f"{base}{path}", headers=headers, params=params, timeout=timeout)
+            if resp.status_code != 200:
+                findings.append(_finding("spec_behavior_mismatch", "error", filename, group, f"{rule}，應回 200——實際回 {resp.status_code}。{_response_excerpt(resp)}", path=path, method="GET", location="security"))
+
+        # ---- 5. 用 key 自己刪除，之後立刻失效
+        for name in scope_sets:
+            resp = scope_session.delete(f"{base}{APIKEYS_SELF_PATH}", headers={"X-Api-Key": keys[name]}, timeout=timeout)
+            if resp.status_code != 200:
+                findings.append(_finding("spec_behavior_mismatch", "error", filename, group, f"受限 key {name} 呼叫 apikeys:self 刪除自己，應回 200——實際回 {resp.status_code}。{_response_excerpt(resp)}", path=APIKEYS_SELF_PATH, method="DELETE"))
+                continue
+            after = scope_session.get(f"{base}/api/public/knowledge/v3/knowledges", headers={"X-Api-Key": keys[name]}, params={"limit": 1}, timeout=timeout)
+            if after.status_code != 401:
+                findings.append(_finding("spec_behavior_mismatch", "error", filename, group, f"spec 寫刪除後立刻失效，但 key {name} 刪除後再呼叫回 {after.status_code}，不是 401。{_request_id_note(after)}", path=APIKEYS_SELF_PATH, method="DELETE"))
+
+        for name, (passed, total) in stats.items():
+            if passed == total:
+                findings.append(_finding("live_write_ok", "info", filename, group, f"受限 key {name}（scopes={scope_sets[name]}）打 {total} 支端點，放行與擋下都符合 ApikeyScope 對照表"))
+    except (requests.RequestException, ValueError) as exc:
+        findings.append(_finding("live_write_error", "error", filename, group, f"scope 測試中途失敗：{exc}", path=APIKEYS_PATH))
+    finally:
+        # 清理：清單裡還找得到的（apikeys:self 沒刪掉、或不該建成功卻建成功的）用 access token 批次刪
+        if created:
+            try:
+                remaining = [k for k in created if k in key_items()]
+                if remaining:
+                    session.delete(f"{base}{APIKEYS_BATCH_DELETE_PATH}", params={"keys": remaining}, timeout=timeout)
+                    still = [k for k in remaining if k in key_items()]
+                    if still:
+                        raise RuntimeError(f"批次刪除後仍找得到 {', '.join(label(k) for k in still)}")
+            except Exception as exc:  # noqa: BLE001
+                findings.append(_finding("live_write_cleanup_failed", "error", filename, group, f"清除 scope 測試建立的 key 失敗：{exc}，這些 key 一小時內才會過期，需要手動清理", path=APIKEYS_BATCH_DELETE_PATH, method="DELETE"))
+    _finalize(findings, filename, group, "API key scope 的建立規則、放行／擋下矩陣、Bearer 寫法、自我刪除後失效全部符合 spec，測試用的 key 已清除")
     return findings
