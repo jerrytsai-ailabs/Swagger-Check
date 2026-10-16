@@ -40,6 +40,7 @@ from agent.live_call import check_token_valid, run_live_get_checks
 from agent.behavior_test import (
     run_asura_speech_behavior_test,
     run_embeddings_behavior_test,
+    run_no_token_behavior_test,
     run_openai_speech_behavior_test,
     run_openai_transcription_behavior_test,
     run_pagination_behavior_test,
@@ -237,6 +238,7 @@ def main():
                 run_embeddings_behavior_test,
                 run_asura_speech_behavior_test,
                 run_pagination_behavior_test,
+                run_no_token_behavior_test,
             ):
                 test_start = time.perf_counter()
                 write_findings = run_test(entries, api_base_url, args.token)

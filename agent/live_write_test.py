@@ -916,6 +916,49 @@ def run_knowledge_document_crud_test(entries, api_base_url, token, timeout=30):
                 )
             )
 
+    # Step 4.2：GET :download——spec 寫不回檔案內容，而是 307 轉址到短效的預簽 URL。
+    # 不自動跟隨轉址，先驗 307 與 Location／Cache-Control；Location 跟 API 同一個主機才跟過去
+    # 下載、比對內容跟剛上傳的一樣（不同主機就不跟，理由同 live_call 的不跟隨 redirect）。
+    if document_item_path:
+        download_path_template = document_item_path_template + ":download"
+        try:
+            resp = session.get(f"{base}{document_item_path}:download", timeout=timeout, allow_redirects=False)
+            _check_status_and_schema(kb_op(download_path_template, "get"), resp, findings, kb_filename, kb_group, download_path_template, "get")
+            location = resp.headers.get("Location")
+            if resp.status_code != 307 or not location:
+                findings.append(
+                    _finding(
+                        "live_write_data_mismatch",
+                        "error",
+                        kb_filename,
+                        kb_group,
+                        f"spec 寫 :download 回 307 轉址到預簽 URL，實際回 {resp.status_code}，Location={'有' if location else '沒有'}。{_response_excerpt(resp)}",
+                        path=download_path_template,
+                        method="GET",
+                    )
+                )
+            else:
+                if "Cache-Control" not in resp.headers:
+                    findings.append(_finding("live_write_data_mismatch", "warning", kb_filename, kb_group, "307 回應沒有 spec 宣告的 Cache-Control header", path=download_path_template, method="GET"))
+                target = requests.compat.urljoin(f"{base}/", location)
+                if requests.utils.urlparse(target).netloc == requests.utils.urlparse(base).netloc:
+                    # 預簽 URL 本身就是憑證，不帶 X-Access-Token
+                    file_resp = requests.get(target, timeout=timeout)
+                    if file_resp.status_code != 200 or file_resp.content != KNOWLEDGE_DOC_TEST_CONTENT:
+                        findings.append(
+                            _finding(
+                                "live_write_data_mismatch",
+                                "error",
+                                kb_filename,
+                                kb_group,
+                                f"跟隨 :download 的轉址下載回來的內容跟上傳的檔案不一樣（狀態碼 {file_resp.status_code}、{len(file_resp.content)} bytes，上傳的是 {len(KNOWLEDGE_DOC_TEST_CONTENT)} bytes）",
+                                path=download_path_template,
+                                method="GET",
+                            )
+                        )
+        except requests.RequestException as exc:
+            findings.append(_finding("live_write_error", "error", kb_filename, kb_group, f"GET :download 失敗：{exc}", path=download_path_template, method="GET"))
+
     # Step 4.5：文件還留著的時候，先試著刪知識庫容器一次——藉此實測驗證 spec 對這支端點的
     # 描述（「底下的文件會一起消失，而且無法復原」）是否屬實。這一步的結果不論如何都會記成
     # 一筆 finding，讓「文件寫的行為」跟「實測到的行為」是否一致有明確的證據，而不只是口頭轉述。
@@ -1083,9 +1126,23 @@ def run_fedflow_execute_test(entries, api_base_url, token, timeout=20, flow_id=N
     execute_path_template = "/api/public/fedflow/v1/flows/{flowId}/execute"
     result_path_template = "/api/public/fedflow/v1/executions/{executionId}/result"
 
+    input_schema_path_template = "/api/public/fedflow/v1/flows/{flowId}/input-schema"
+    stream_path_template = "/api/public/fedflow/v1/executions/{executionId}/stream"
+
     session = _make_session(token)
     base = api_base_url.rstrip("/")
     execute_path = execute_path_template.replace("{flowId}", flow_id)
+
+    # Step 0：GET input-schema（spec 寫的四步流程第 2 步，execute 前要先拿）。只讀；404 代表這個環境
+    # 沒有測試 flow，交給下面 POST 那一步統一判斷跳過，這裡不重複記。
+    try:
+        resp = session.get(f"{base}{input_schema_path_template.replace('{flowId}', flow_id)}", timeout=timeout)
+        if resp.status_code != 404 and not _is_permission_denied(resp):
+            ok = _check_status_and_schema(op_of(input_schema_path_template, "get"), resp, findings, filename, group, input_schema_path_template, "get")
+            if ok and resp.status_code == 200 and not isinstance((resp.json() or {}).get("inputSchema"), dict):
+                findings.append(_finding("live_write_data_mismatch", "error", filename, group, f"input-schema 回 200，但沒有 inputSchema 物件：{resp.text[:200]}", path=input_schema_path_template, method="GET"))
+    except (requests.RequestException, ValueError) as exc:
+        findings.append(_finding("live_write_error", "error", filename, group, f"GET input-schema 失敗：{exc}", path=input_schema_path_template, method="GET"))
 
     # Step 1：POST 觸發執行
     try:
@@ -1128,6 +1185,24 @@ def run_fedflow_execute_test(entries, api_base_url, token, timeout=20, flow_id=N
         return findings
 
     real_result_path = result_path_template.replace("{executionId}", execution_id)
+    real_stream_path = stream_path_template.replace("{executionId}", execution_id)
+    stream_op = op_of(stream_path_template, "get")
+
+    # Step 1.5：馬上接 GET .../stream。測試 flow 跑得很快，接上時可能還在跑（200 串流）或已經結束
+    # （400 data.validation），兩種都是 spec 寫的行為；只有串流裡出現 event: error 或其他狀態碼才記。
+    try:
+        with session.get(f"{base}{real_stream_path}", timeout=timeout, stream=True) as resp:
+            _check_status_and_schema(stream_op, resp, findings, filename, group, stream_path_template, "get")
+            if resp.status_code == 200:
+                _, error_event = _parse_sse_dialect_a(resp)
+                if error_event is not None:
+                    findings.append(_finding("live_write_error", "error", filename, group, f"接回執行中的串流，收到 event: error：{error_event}", path=stream_path_template, method="GET"))
+            elif resp.status_code != 400:
+                findings.append(
+                    _finding("live_write_data_mismatch", "error", filename, group, f"執行剛送出就接串流，預期 200 串流或（已結束時）400，實際回 {resp.status_code}。{_response_excerpt(resp)}", path=stream_path_template, method="GET")
+                )
+    except requests.RequestException as exc:
+        findings.append(_finding("live_write_error", "error", filename, group, f"GET 接回執行串流失敗：{exc}", path=stream_path_template, method="GET"))
 
     # Step 2：輪詢結果直到終態
     state = None
@@ -1178,7 +1253,31 @@ def run_fedflow_execute_test(entries, api_base_url, token, timeout=20, flow_id=N
         )
         return findings
 
-    _finalize_ok(findings, filename, group, f"POST execute → GET result 輪詢驗證通過，flow 執行成功結束（executionId={execution_id}）")
+    # Step 3：執行已經 FINISHED，spec 寫這時接串流要回 400 data.validation（沒有串流可接）。每次結果都一定，主要驗這一步。
+    try:
+        resp = session.get(f"{base}{real_stream_path}", timeout=timeout)
+        _check_status_and_schema(stream_op, resp, findings, filename, group, stream_path_template, "get")
+        try:
+            reason = resp.json().get("reason")
+        except ValueError:
+            reason = None
+        if resp.status_code != 400 or reason != "data.validation":
+            findings.append(
+                _finding(
+                    "live_write_data_mismatch",
+                    "error",
+                    filename,
+                    group,
+                    f"執行已結束時接串流，spec 寫應回 400 data.validation，實際回 {resp.status_code}（reason={reason!r}）。{_response_excerpt(resp)}",
+                    path=stream_path_template,
+                    method="GET",
+                    location="responses.400",
+                )
+            )
+    except requests.RequestException as exc:
+        findings.append(_finding("live_write_error", "error", filename, group, f"GET 已結束執行的串流失敗：{exc}", path=stream_path_template, method="GET"))
+
+    _finalize_ok(findings, filename, group, f"GET input-schema → POST execute → GET stream → GET result 輪詢 → 結束後 GET stream 回 400，全部驗證通過（executionId={execution_id}）")
 
     return findings
 

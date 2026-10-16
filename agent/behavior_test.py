@@ -554,3 +554,95 @@ def run_pagination_behavior_test(entries, api_base_url, token, timeout=30):
         if not any(f["severity"] == "error" and f["path"] == template for f in findings):
             findings.append(_finding("live_write_ok", "info", filename, group, f"{template} 的 {passed} 條分頁／排序規則全部符合 spec", path=template, method="GET"))
     return findings
+
+
+# ---------------------------------------------------------------- 不帶 token 的 401
+
+NO_TOKEN_FAKE_ID = "agent-test-nonexistent"
+# 漏了驗證的話，這幾支就算 path 參數是假的也可能真的執行（reset 不吃 body、會清掉共用環境的套件），所以不打
+NO_TOKEN_EXCLUDED = {
+    ("POST", "/api/public/fedflow/v1/packages/{language}"),
+    ("DELETE", "/api/public/fedflow/v1/packages/{language}"),
+    ("POST", "/api/public/fedflow/v1/packages/{language}/reset"),
+}
+
+
+def run_no_token_behavior_test(entries, api_base_url, token, timeout=20):
+    """每支需要驗證的端點都不帶憑證打一次，驗證 Common 分頁「認證與授權」寫的規則：
+    完全沒帶憑證回 401、reason 是 auth.no-auth、body 是標準的錯誤格式。
+
+    大部分端點的 responses 沒有逐支列 401，是統一寫在 Common 分頁，所以這裡把 Common 當成宣告，
+    不會因為「這支沒列 401」而報錯。有逐支列 401 的（OpenAI V1、部分 Auth V2）就對它自己宣告的 schema 驗，
+    其餘對該檔案的 components.schemas.Error 驗。
+
+    不帶 token、不送 body，path 參數一律換成不存在的假 ID：萬一某支真的漏了驗證，最壞也只會
+    拿到 400／404，不會動到真實資料。token 參數不使用（介面跟其他測試一致）。
+    """
+    findings = []
+    session = requests.Session()  # 刻意不用 _make_session：不能帶任何憑證
+    base = api_base_url.rstrip("/")
+    by_file = {}
+    for entry in entries:
+        spec = entry.get("spec")
+        if not entry.get("is_real") or not spec:
+            continue
+        global_security = spec.get("security")
+        error_schema = ((spec.get("components") or {}).get("schemas") or {}).get("Error")
+        for path, item in (spec.get("paths") or {}).items():
+            for method, op in item.items():
+                method_upper = method.upper()
+                if not isinstance(op, dict) or method_upper not in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
+                    continue
+                security = op.get("security", global_security)
+                if not security or security == [{}] or (method_upper, path) in NO_TOKEN_EXCLUDED:
+                    continue  # 本來就不用驗證（providers、登入），或刻意不打
+                filename, group = entry["filename"], entry["group"]
+                stats = by_file.setdefault((filename, group), [0, 0])
+                stats[1] += 1
+                real_path = re.sub(r"\{[^}]+\}", NO_TOKEN_FAKE_ID, path)
+                try:
+                    resp = session.request(method_upper, f"{base}{real_path}", timeout=timeout, allow_redirects=False)
+                except requests.RequestException as exc:
+                    findings.append(_finding("live_write_error", "error", filename, group, f"不帶 token 呼叫失敗：{exc}", path=path, method=method_upper))
+                    continue
+                problem = None
+                if resp.status_code != 401:
+                    problem = f"實際回 {resp.status_code}"
+                else:
+                    try:
+                        body = resp.json()
+                    except ValueError:
+                        body = None
+                    resp_401 = (op.get("responses") or {}).get("401") or {}
+                    declared = (((resp_401.get("content") or {}).get("application/json")) or {}).get("schema")
+                    schema = declared or error_schema
+                    # 端點自己的 401 說明寫了 reason 的話以它為準（例如 apikeys:self 只收 X-Api-Key，沒帶時寫明是 auth.invalid-auth）
+                    expected_reasons = set(re.findall(r"auth\.[a-z-]+", resp_401.get("description") or "")) or {"auth.no-auth"}
+                    if body is None:
+                        problem = "回 401，但 body 不是 JSON"
+                    elif body.get("reason") not in expected_reasons:
+                        problem = f"回 401，但 reason 是 {body.get('reason')!r}，不是 {' / '.join(sorted(expected_reasons))}"
+                    elif schema:
+                        errors = list(Draft202012Validator(_deref_schema(schema, spec)).iter_errors(body))
+                        if errors:
+                            loc = ".".join(str(p) for p in errors[0].path) or "(root)"
+                            problem = f"回 401，但 body 在 {loc} 不符合錯誤格式的 schema：{_shorten_schema_message(errors[0].message, 150)}"
+                if problem:
+                    findings.append(
+                        _finding(
+                            "spec_behavior_mismatch",
+                            "error",
+                            filename,
+                            group,
+                            f"Common 分頁寫完全沒帶憑證回 401 auth.no-auth——不帶 token 呼叫，{problem}。{_response_excerpt(resp)}",
+                            path=path,
+                            method=method_upper,
+                            location="security",
+                        )
+                    )
+                else:
+                    stats[0] += 1
+    for (filename, group), (passed, total) in sorted(by_file.items()):
+        if passed == total:
+            findings.append(_finding("live_write_ok", "info", filename, group, f"不帶 token 的 {total} 支端點都正確回 401 auth.no-auth"))
+    return findings
