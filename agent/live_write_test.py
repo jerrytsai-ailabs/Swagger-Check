@@ -132,6 +132,14 @@ def _is_permission_denied(resp):
     return "auth." in reason
 
 
+def _reason_of(resp):
+    """錯誤回應的 reason；不是 JSON 就回傳 None。"""
+    try:
+        return resp.json().get("reason")
+    except (ValueError, AttributeError):
+        return None
+
+
 def _parse_sse_dialect_a(resp):
     """解析 Chat V2/Flowise V3 用的 SSE 方言 A。
 
@@ -959,28 +967,38 @@ def run_knowledge_document_crud_test(entries, api_base_url, token, timeout=30):
         except requests.RequestException as exc:
             findings.append(_finding("live_write_error", "error", kb_filename, kb_group, f"GET :download 失敗：{exc}", path=download_path_template, method="GET"))
 
-    # Step 4.5：文件還留著的時候，先試著刪知識庫容器一次——藉此實測驗證 spec 對這支端點的
-    # 描述（「底下的文件會一起消失，而且無法復原」）是否屬實。這一步的結果不論如何都會記成
-    # 一筆 finding，讓「文件寫的行為」跟「實測到的行為」是否一致有明確的證據，而不只是口頭轉述。
+    # Step 4.5：文件還留著的時候，先試著刪知識庫容器一次，對照 spec 這支端點「現在」的描述：
+    #   - 描述寫「底下的文件會一起消失」（v3.14 以前）→ 應該回 200 並連文件一起刪
+    #   - 描述寫「還有文件就不能刪、要先清空」（FEDGPT-17069 修正後）→ 應該回 spec 有宣告的錯誤碼（423）
+    # 判斷依據是 spec 當下的文字，不寫死某一版的說法，修正部署後不會繼續誤報。結果不論如何都記一筆 finding。
     container_already_gone = False
     if document_item_path:
+        delete_op = kb_op(knowledge_item_path_template, "delete")
+        delete_desc = delete_op.get("description") or ""
+        says_cascade = "一起消失" in delete_desc
         try:
             resp = session.delete(f"{base}{knowledge_item_path}", timeout=timeout)
-            _check_status_and_schema(kb_op(knowledge_item_path_template, "delete"), resp, findings, kb_filename, kb_group, knowledge_item_path_template, "delete")
+            _check_status_and_schema(delete_op, resp, findings, kb_filename, kb_group, knowledge_item_path_template, "delete")
+            status_declared = str(resp.status_code) in (delete_op.get("responses") or {})
             if resp.status_code == 200:
-                findings.append(
-                    _finding(
-                        "live_write_ok",
-                        "info",
-                        kb_filename,
-                        kb_group,
-                        "文件仍存在時刪除知識庫容器，實際回 200（成功）——這次的實測結果跟 spec 描述的「底下文件會一起消失」一致",
-                        path=knowledge_item_path_template,
-                        method="DELETE",
-                    )
-                )
                 container_already_gone = True
-            else:
+                if says_cascade:
+                    findings.append(
+                        _finding("live_write_ok", "info", kb_filename, kb_group, "文件仍存在時刪除知識庫容器回 200，跟 spec 描述的「底下文件會一起消失」一致", path=knowledge_item_path_template, method="DELETE")
+                    )
+                else:
+                    findings.append(
+                        _finding(
+                            "spec_description_mismatch",
+                            "warning",
+                            kb_filename,
+                            kb_group,
+                            "spec 對 DELETE /knowledges/{knowledgeId} 的描述是知識庫裡還有文件就不能刪，但實測在文件仍存在時呼叫回 200，直接刪除成功——文件描述的行為與實際行為不一致",
+                            path=knowledge_item_path_template,
+                            method="DELETE",
+                        )
+                    )
+            elif says_cascade:
                 findings.append(
                     _finding(
                         "spec_description_mismatch",
@@ -994,6 +1012,19 @@ def run_knowledge_document_crud_test(entries, api_base_url, token, timeout=30):
                         method="DELETE",
                     )
                 )
+            elif status_declared:
+                findings.append(
+                    _finding(
+                        "live_write_ok",
+                        "info",
+                        kb_filename,
+                        kb_group,
+                        f"文件仍存在時刪除知識庫容器回 {resp.status_code}（reason={_reason_of(resp)!r}），跟 spec 描述的「還有文件就不能刪」一致，且 {resp.status_code} 有宣告",
+                        path=knowledge_item_path_template,
+                        method="DELETE",
+                    )
+                )
+            # 其他情況（狀態碼沒宣告）已經由上面的 _check_status_and_schema 記成 undocumented_status_code
         except requests.RequestException as exc:
             findings.append(
                 _finding("live_write_error", "warning", kb_filename, kb_group, f"實測「文件還在時刪知識庫」這一步失敗：{exc}", path=knowledge_item_path_template, method="DELETE")
