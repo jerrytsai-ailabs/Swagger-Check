@@ -2,22 +2,23 @@
 
 > 這份檔案由 `run_check.py` 每次執行自動覆寫，請勿手動編輯。完整細節請看同一次執行產生的 `reports/FedGPT-API-Review-*.html`。
 
-- 最後更新：2026-10-15 09:35:34 +0800
+- 最後更新：2026-10-16 09:32:50 +0800
 - 來源：https://fedgpt-stg2-vm1.corp.ailabs.tw/swagger/
 - 這次跑的階段：靜態比對、Live GET、Live 寫入、LLM 審查
 
 | 整體結果 | Pass | Fail | Endpoint 總數 | Pass 率 |
 |---|---|---|---|---|
-| **FAIL** | 73 | 12 | 85 | 85.9% |
+| **FAIL** | 67 | 18 | 85 | 78.8% |
 
 | 總發現數 | Error | Warning | Info | 無發現的分頁 |
 |---|---|---|---|---|
-| 191 | 21 | 48 | 122 | 0/10 |
+| 206 | 34 | 49 | 123 | 0/10 |
 
 ## 執行歷史
 
 | 時間 | 環境 | live-write | Pass 率 | Pass/總數 | Error | Warning | Info |
 |---|---|---|---|---|---|---|---|
+| 2026-10-16 09:32:50 +0800 | stg2-vm1 | ✓ | 78.8% | 67/85 | 34 | 49 | 123 |
 | 2026-10-15 09:35:34 +0800 | stg2-vm1 | ✓ | 85.9% | 73/85 | 21 | 48 | 122 |
 | 2026-10-14 09:35:26 +0800 | stg2-vm1 | ✓ | 85.9% | 73/85 | 24 | 48 | 122 |
 | 2026-10-13 09:35:43 +0800 | stg2-vm1 | ✓ | 85.9% | 73/85 | 24 | 48 | 132 |
@@ -42,18 +43,18 @@
 |---|---|---|
 | Common | `0.yaml` | 說明用分頁 |
 | SSE 串流 | `sse.yaml` | 說明用分頁 |
-| Admin V1 | `admin-v1.yaml` | 4 個發現 |
-| Asset V2 | `asset-v2.yaml` | 9 個發現 |
-| Asura V1 | `asura-v1.yaml` | 18 個發現 |
-| Auth V2 | `auth-v2.yaml` | 12 個發現 |
-| Chat V2 | `chat-v2.yaml` | 46 個發現 |
+| Admin V1 | `admin-v1.yaml` | 6 個發現 |
+| Asset V2 | `asset-v2.yaml` | 5 個發現 |
+| Asura V1 | `asura-v1.yaml` | 20 個發現 |
+| Auth V2 | `auth-v2.yaml` | 14 個發現 |
+| Chat V2 | `chat-v2.yaml` | 49 個發現 |
 | FAQ V1 | `faq-v1.yaml` | 14 個發現 |
-| FedFlow V1 | `fedflow-v1.yaml` | 44 個發現 |
+| FedFlow V1 | `fedflow-v1.yaml` | 45 個發現 |
 | Helix V1 | `helix-v1.yaml` | 12 個發現 |
-| Knowledge V3 | `knowledge-v3.yaml` | 17 個發現 |
-| OpenAI V1 | `openai-v1.yaml` | 15 個發現 |
+| Knowledge V3 | `knowledge-v3.yaml` | 18 個發現 |
+| OpenAI V1 | `openai-v1.yaml` | 23 個發現 |
 
-## Error（21 筆，依根因合併）
+## Error（34 筆，依根因合併）
 
 | 階段 | 分頁 | Endpoint | 位置 | 問題 | 規則 | 筆數 |
 |---|---|---|---|---|---|---|
@@ -69,10 +70,22 @@
 | Live 寫入 | Chat V2 | POST `/api/public/chat/v2/chat/tabular` | — | POST 送訊息（tabular）沒有回 200（實際 423），中止測試（仍會清理臨時資源） | `live_write_aborted` | 1 |
 | Live 寫入 | Asura V1 | GET `/api/public/asura/v1/transcriptions/{transcriptionId}` | `sentences.N` | 實際回應在 sentences.N 不符合 spec 宣告的 schema：'sentiment' is a required property | `response_schema_mismatch` | 3 |
 | Live 寫入 | Chat V2 | POST `/api/public/chat/v2/chat/tabular:stream` | — | 串流中途收到 event: error：{'service': 'grpc-knowledge', 'reason': 'data.locked', 'message': 'tabular not ready for query'} | `live_write_aborted` | 1 |
-| Live 寫入 | Helix V1 | POST `/api/public/helix/v1/enrollment` | — | 實際回傳 500，但 spec 裡這支 endpoint 沒有宣告這個狀態碼（宣告的有：['200', '400', '409']）。回應內容：{"service":"","reason":"","message":"500: Internal Server Error"}（X-Request-Id: <id>） | `undocumented_status_code` | 1 |
-| Live 寫入 | Helix V1 | POST `/api/public/helix/v1/enrollment` | — | POST 註冊聲紋沒有回 200（實際 500）。回應內容：{"service":"","reason":"","message":"500: Internal Server Error"}（X-Request-Id: <id>），中止測試 | `live_write_aborted` | 1 |
+| Live 寫入 | Helix V1 | GET `/api/public/helix/v1/enrollment` | — | 實際回傳 401，但 spec 裡這支 endpoint 沒有宣告這個狀態碼（宣告的有：['200']）。回應內容：{"service":"grpc-auth","reason":"auth.invalid-auth","message":"user token expired"}（X-Request-Id: <id>） | `undocumented_status_code` | 1 |
+| Live 寫入 | Helix V1 | GET `/api/public/helix/v1/enrollment` | — | GET 查詢註冊狀態沒有回 200（實際 401），中止測試 | `live_write_aborted` | 1 |
+| Live 寫入 | OpenAI V1 | POST `/api/public/llm/v1/fedgpt/v1/audio/speech` | — | 實際回傳 200 的 Content-Type 是 audio/mpeg，但 spec 這個狀態碼宣告的只有：['audio/wav', 'audio/pcm', 'text/event-stream'] | `response_content_type_mismatch` | 1 |
+| Live 寫入 | OpenAI V1 | POST `/api/public/llm/v1/fedgpt/v1/audio/speech` | `requestBody.response_format.default` | 沒帶 response_format 時 spec 寫預設回 wav（audio/wav、RIFF header），實際 Content-Type 是 audio/mpeg、開頭 4 bytes 是 b'ID3\x04'（54957 bytes）（X-Request-Id: <id>） | `live_write_data_mismatch` | 1 |
+| Live 寫入 | OpenAI V1 | POST `/api/public/llm/v1/fedgpt/v1/audio/speech` | `requestBody.response_format` | response_format 只有 wav／pcm，mp3 應回 400——實際回 200。回應內容：（audio/mpeg，42285 bytes，內容省略）（X-Request-Id: <id>） | `spec_behavior_mismatch` | 1 |
+| Live 寫入 | OpenAI V1 | POST `/api/public/llm/v1/fedgpt/v1/audio/speech` | `requestBody.speed` | speed 只收 1，1.5 應回 400——實際回 200。回應內容：（audio/mpeg，33837 bytes，內容省略）（X-Request-Id: <id>） | `spec_behavior_mismatch` | 1 |
+| Live 寫入 | OpenAI V1 | POST `/api/public/llm/v1/fedgpt/v1/audio/transcriptions` | `(root)` | 實際回應在 (root) 符合 oneOf 的條件不只一個：回應同時符合 oneOf 裡的多個 schema，但 oneOf 要求恰好符合一個（各 schema 沒有用 additionalProperties 或必填欄位區分開） | `response_schema_mismatch` | 1 |
+| Live 寫入 | OpenAI V1 | POST `/api/public/llm/v1/retriever/v1/embeddings` | `requestBody.dimensions` | dimensions=1024（spec 範例值）應回 1024 維，模型不支援降維就照 spec 說的「不生效」回原生維度——實際回 400。回應內容：{"error":{"message":"Model 'embedding-v3.0' only supports dimensions in range [1, 768], got 1024.","type":"BadRequestError","param":null,"code":400}}（X-Request-Id: <id>） | `spec_behavior_mismatch` | 1 |
+| Live 寫入 | OpenAI V1 | POST `/api/public/llm/v1/retriever/v1/embeddings` | `data.N.embedding` | 實際回應在 data.N.embedding 不符合 spec 宣告的 schema：<4096 字元的字串> is not of type 'array' | `response_schema_mismatch` | 1 |
+| Live 寫入 | Admin V1 | GET `/api/public/admin/v1/apikeys/{userId}` | `parameters.limit` | limit 下限 1，0 應回 400 data.validation——實際回 200。（X-Request-Id: <id>） | `spec_behavior_mismatch` | 1 |
+| Live 寫入 | Admin V1 | GET `/api/public/admin/v1/apikeys/{userId}` | `parameters.page` | page 從 1 開始，0 應回 400 data.validation——實際回 200。（X-Request-Id: <id>） | `spec_behavior_mismatch` | 1 |
+| Live 寫入 | Knowledge V3 | GET `/api/public/knowledge/v3/knowledges/{knowledgeId}/documents` | `parameters.page` | page 從 1 開始，0 應回 400 data.validation——實際回 200。回應內容：{"documents":[{"documentId":"<id>","fileName":"隱私檢核/小紅身分證.ppt","displayState":"completed","state":"completed","runState":"completed","chunkSize":1,"sensitiveInfoCheckRequired":false,"createdAt":1782883406,"updatedAt":1782883932},{"documentId":"<id>","fileName":"隱私檢核…（X-Request-Id: <id>） | `spec_behavior_mismatch` | 1 |
+| Live 寫入 | Chat V2 | GET `/api/public/chat/v2/conversations` | `parameters.query` | query 上限 200 字，201 字時應回 spec 有宣告的狀態碼——實際回 400，spec 這支只宣告了 ['200']。回應內容：{"service":"http-gateway","reason":"data.validation","message":"invalid request query; Key: 'listConversationQuery.Query' Error:Field validation for 'Query' failed on the 'max' tag"}（X-Request-Id: <id>） | `spec_behavior_mismatch` | 1 |
+| Live 寫入 | Chat V2 | GET `/api/public/chat/v2/conversations/{convId}/messages` | `messages.N.humanInLoop` | 實際回應在 messages.N.humanInLoop 不符合 spec 宣告的 schema：None is not of type 'object' | `response_schema_mismatch` | 2 |
 
-## Warning（48 筆，依根因合併）
+## Warning（49 筆，依根因合併）
 
 | 階段 | 分頁 | Endpoint | 位置 | 問題 | 規則 | 筆數 |
 |---|---|---|---|---|---|---|
@@ -123,13 +136,14 @@
 | Live 寫入 | Asura V1 | POST `/api/public/asura/v1/speeches:stream` | — | SpeechModelConfig.model 的 spec 範例值 'tts-general-0.0.1' 在 stg2-vm1 實測不存在（後端查模型收到 404，reason=inferno.get-model.failed），且 spec 沒有提供任何端點可查詢這個部署實際支援的 TTS 模型名稱清單（不像 Chat V2 有 GET /models）——正確版本（tts-general-1.3.3）只能問熟悉部署的人才拿得到 | `spec_description_mismatch` | 1 |
 | Live 寫入 | Asura V1 | POST `/api/public/asura/v1/speeches:stream` | — | spec 宣告 SpeechInput.audioConfig 是選填（required 只列 modelConfig），但不帶它實際回應是 400：Key: 'createRequest.AudioConfig' Error:Field validation for 'AudioConfig' failed on the 'required' tag——代表伺服器端其實把它當必填 | `spec_description_mismatch` | 1 |
 | Live 寫入 | Chat V2 | GET `/api/public/chat/v2/tabulars` | — | GET /chat/v2/tabulars 回傳的 Tabular schema（tabularId/name/description）沒有任何欄位可以判斷資源是否已就緒可查詢；實測發現部分既有 tabular 會在 chat/tabular 回 423 data.locked（'tabular not ready for query'），但這個狀態碼完全沒有寫進 chat/tabular 的 spec 文件，也無法事先得知 | `spec_description_mismatch` | 2 |
+| Live 寫入 | Asura V1 | POST `/api/public/asura/v1/speeches:stream` | `responses.200.content` | audioConfig.encoding 的說明寫回應 Content-Type 隨 encoding 變（6 種），但 200 的 content 只宣告了 ['audio/wav']，少了 ['audio/aac', 'audio/flac', 'audio/mpeg', 'audio/ogg', 'audio/pcm'] | `spec_description_mismatch` | 1 |
 
 ## Info（只列數量）
 
 | 規則 | 筆數 |
 |---|---|
-| `live_write_ok` | 24 |
-| `live_write_permanent_residue` | 11 |
+| `live_write_ok` | 29 |
+| `live_write_permanent_residue` | 7 |
 | `live_write_skipped` | 2 |
 
 ## LLM 文字審查
